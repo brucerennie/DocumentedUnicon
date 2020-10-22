@@ -1,0 +1,64 @@
+#RD:
+#: this record holds information required by the iconc compiler that is
+#: obtained from the unicon csource file and associates the name of the
+#: icon temporary file holding the icon equivalent code parsed from the
+#: unicon source file
+#:
+record  ufile(
+    tmpnm,                              #RF: the temporary name that was
+                                        #:   programmatically chosen for
+                                        #:   the icon output file to be
+                                        #:   passed to iconc compiler
+    imps,                               #RF: list of import declarations
+    lnks,                               #RF: list of link declarations
+    procs,                              #RF: list of procedure declarations
+    classes,                            #RF: list of class declarations
+    pkg                                 #RF: package name "dflt" is used
+                                        #:   when there is no package name
+                                        #:   defined, otherwise it is the
+                                        #:   package name
+)
+#RD:
+#:
+#:
+#:
+record  ubndl(
+    typ,                                #RF:
+    name,                               #RF:
+    entry,                              #RF:
+    classes,                            #RF:
+    syms                                #RF:
+)
+#RD:
+#:
+#:
+#:
+record  ucls(
+    name,                               #RF:
+    fullname,                           #RF:
+    entry,                              #RF:
+    supers                              #RF:
+)
+
+#
+#
+
+#RD:
+#: tokens are records mainly for historical reasons at this point.
+#: unilex.icn can probably still be compiled with icont, simplifying
+#: bootstrapping, but if not for that, token should become a class.
+#:
+#:
+record token(
+    tok,                                #RF: the token type for this token,
+                                        #:   see the token type codes as found
+                                        #:   in the source file ytab_h.icn.
+    s,                                  #RF: string representation of the token
+    line,                               #RF: line number in the source code
+                                        #:   where this token has been found
+    column,                             #RF: column that is the start of the token
+    filename                            #RF: name of the source file in which
+                                        #:   token has occurred
+)
+
+

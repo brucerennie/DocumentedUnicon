@@ -1,0 +1,594 @@
+########################################################################
+#
+# File   : commentlexer.icn
+#
+# Author : Bruce Rennie
+#
+########################################################################
+#
+
+#PD:
+#: yylex2Comments() - this is alternative lexer to handle structured comments
+#: for situations where like "intelligent" editoirs or code reformatters such
+#: as pretty-printers. It is a test to see if and how useful structured comments
+#: can be in providing additional documentation for the Unicon code base and
+#: anything written using the IPL and other Unicon library resources.
+#:
+#: I suspect this will remain a work in progress for some time
+#:
+procedure yylex2Comments()
+    static  comment_type                #SV:
+    local   temp1,                      #LV: temporary to hold subsiduary
+                                        #:   table for initialisation
+            temp2                       #LV: temporary to hold a second
+                                        #:   subsiduary table for initialisation
+
+    initial {
+        #
+        # creation of a table that will call the appropriate comment handling procedure
+        # for each comment type, which are the key values into this table. The comment type
+        # will the next characters immediately after the "#" character that is standard
+        # for all unicon/icon program files. If the next characters are not recognised, then
+        # the standard comment handling procedure will be called to process that comment. The keys
+        # of this table will be matched against the input file at the current position.
+        #
+        comment_type := table(standardcomment)
+        #
+        # "LK:" will call the procedure that will handle the specific "link" directive comments
+        # that are entered into the source file
+        #
+        comment_type["LK:"] := link_comment
+        #
+        # "IM:" will call the procedure that will handle the specific "import" directive comments
+        #
+        comment_type["IM:"] := import_comment
+        #
+        # "CD:" will call the procedure that will handle the "class" definition comments
+        #
+        comment_type["CD:"] := class_definition_comment
+        #
+        # "CV:" will call the procedure that will handle the class variable comments. These variables
+        # are the ones defined as class parameters.
+        #
+        comment_type["CV:"] := class_variable_comment
+        #
+        # "MD:" will call the procedure that will handle the method definition comments.
+        #
+        comment_type["MD:"] := method_definition_comment
+        #
+        # "LV:" will call the procedure that will handle the local variable definition comments
+        #
+        comment_type["LV:"] := local_variable_comment
+        #
+        # "SV:" will call the procedure that will handle the static variable definition comments
+        #
+        comment_type["SV:"] := static_variable_comment
+        #
+        # "PD:" will call the procedure that will handle the procedure definition comments
+        #
+        comment_type["PD:"] := procedure_definition_comment
+        #
+        # "RD:" will call the procedure that will handle the record definition comments
+        #
+        comment_type["RD:"] := record_definition_comment
+        #
+        # "RF:" will call the procedure that will handle the record field description comments
+        #
+        comment_type["RF:"] := record_field_comment
+        #
+        # "GD:" will call the procedure that will handle the global variable definition comments
+        #
+        comment_type["GD:"] := global_definition_comment
+        #
+        # "GV:" will call the procedure that will handle the global variable initialisation comments
+        #
+        comment_type["GV:"] := global_variable_comment
+        #
+        # "GK:" will call the procedure that will handle the global table key initialisation comments
+        #
+        comment_type["GK:"] := global_key_comment
+        #
+        # "PKD:" will call the procedure that will handle the package definiton comments
+        #
+        comment_type["PKD:"] := package_definition_comment
+        #
+        # ":" will reference a secondary table that is set up to handle the various kinds of
+        # continuation comments or special comments, which are described below. If any value
+        # is not found in the table, the standard continuation processing procedure will be called
+        #
+        comment_type[":"] := temp := table(continuation_comment)
+        #
+        # "@" is the special comments character and will reference a tertiary table that is set up
+        # to handle each of the special comments. If something is not found as a key in this table
+        # then the special comments continaution processing procedure is called
+        #
+        temp["@"] := temp2 := table(atcontinuation_comment)
+        #
+        # "param" will call the procedure to handle comments relating to each of the specified parameters
+        # that are described for the "PD:" and "MD:" comments sections. The param comments will be
+        # followed by the parameter name and comments relevant to that parameter.
+        #
+        temp2["param"] := atparam_comment
+        #
+        # "global" will call the procedure to handle comments relating to what global variable a procedure or method
+        # will use
+        #
+        temp2["global"] := atglobal_comment
+        #
+        # "fails" will call the procedure to handle comments relating to what/why/how a procedure or method
+        # may fail
+        #
+        temp2["fails"] := atfails_comment
+        #
+        # "aborts" will call the procedure to handle comments relating to what/why/how a procedure or method
+        # may abort if applicable
+        #
+        temp2["aborts"] := ataborts_comment
+        #
+        # "returns" will call the procedure to handle comments relating to what/why/how a procedure or method
+        # may return and the kinds of values returned if applicable
+        #
+        temp2["returns"] := atreturns_comment
+        #
+        # "suspends" will call the procedure to handle comments relating to what/why/how a procedure or method
+        # may suspend and the kinds of values returned during that suspension
+        #
+        temp2["suspends"] := atsuspends_comment
+        #
+        # "example" will call the procedure to handle comments relating how a procedure or method
+        # can be used or called
+        #
+        temp2["example"] := atexample_comment
+        temp2["attribute"] := atattribute_comment
+        temp2["type"] := attype_comment
+        #
+        # "## Ivib layout ###" will call the procedure to collect and process an Ivib Version 1 layout definition
+        #
+        comment_type["## Ivib layout ###"] := ivib_definition_comment
+        #
+        # "## Ivib-V2 layout ###" will call the procedure to collect and process an Ivib Version 2 layout definition
+        #
+        comment_type["## Ivib-V2 layout ##"] := ivibv2_defintion_comment
+        #
+        # the following comment specifiers will collect any general documentation information that is found
+        # while processing the unicon/icon file
+        #
+        comment_type[" File   :"] := file_description_comment
+        comment_type[" Author :"] := author_description_comment
+        comment_type[" Date   :"] := date_description_comment
+        comment_type[" Update :"] := update_description_comment
+        comment_type[" Purpose:"] := purpose_description_comment
+        comment_type[" Conventions:"] := conventions_description_comment
+        comment_type[" Public Classes:"] := public_classes_comment
+        comment_type[" Private Classes:"] := private_classes_comment
+        comment_type[" Public Fields:"] := public_fields_comment
+        comment_type[" Private Fields:"] := private_fields_comment
+        comment_type[" Public Methods:"] := public_methods_comment
+        comment_type[" Private Methods:"] := private_methods_comment
+        comment_type["GV:"] := global_variable_comment
+        comment_type["GV:"] := global_variable_comment
+        comment_type["GV:"] := global_variable_comment
+        comment_type["GV:"] := global_variable_comment
+    }
+
+end
+
+#PD:
+#: standardcomment() - the default comment handler for all unicon/icon programs
+#:
+#:
+procedure standardcomment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: link_comment()
+#:
+#:
+procedure link_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: import_comment()
+#:
+#:
+procedure import_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: class_definition_comment()
+#:
+#:
+procedure class_definition_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: class_variable_comment()
+#:
+#:
+procedure class_variable_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: method_definition_comment()
+#:
+#:
+procedure method_definition_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: local_variable_comment()
+#:
+#:
+procedure local_variable_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: static_variable_comment()
+#:
+#:
+procedure static_variable_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: procedure_definition_comment()
+#:
+#:
+procedure procedure_definition_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: record_definition_comment()
+#:
+#:
+procedure record_definition_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: record_field_comment()
+#:
+#:
+procedure record_field_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: global_definition_comment()
+#:
+#:
+procedure global_definition_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: global_variable_comment()
+#:
+#:
+procedure global_variable_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: global_key_comment()
+#:
+#:
+procedure global_key_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: continuation_comment()
+#:
+#:
+procedure continuation_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: atcontinuation_comment()
+#:
+#:
+procedure atcontinuation_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: atparam_comment()
+#:
+#:
+procedure atparam_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: atglobal_comment()
+#:
+#:
+procedure atglobal_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: atfails_comment()
+#:
+#:
+procedure atfails_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: ataborts_comment()
+#:
+#:
+procedure ataborts_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: atreturns_comment()
+#:
+#:
+procedure atreturns_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: atsuspends_comment()
+#:
+#:
+procedure atsuspends_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: atexample_comment()
+#:
+#:
+procedure atexample_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: atattribute_comment()
+#:
+#:
+procedure atattribute_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: attype_comment()
+#:
+#:
+procedure attype_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: ivib_definition_comment()
+#:
+#:
+procedure ivib_definition_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: ivibv2_defintion_comment()
+#:
+#:
+procedure ivibv2_defintion_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: file_description_comment()
+#:
+#:
+procedure file_description_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: author_description_comment()
+#:
+#:
+procedure author_description_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: date_description_comment()
+#:
+#:
+procedure date_description_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: update_description_comment()
+#:
+#:
+procedure update_description_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: purpose_description_comment()
+#:
+#:
+procedure purpose_description_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: conventions_description_comment()
+#:
+#:
+procedure conventions_description_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: public_classes_comment()
+#:
+#:
+procedure public_classes_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: private_classes_comment()
+#:
+#:
+procedure private_classes_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: public_fields_comment()
+#:
+#:
+procedure public_fields_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: private_fields_comment()
+#:
+#:
+procedure private_fields_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: public_methods_comment()
+#:
+#:
+procedure public_methods_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#: private_methods_comment()
+#:
+#:
+procedure private_methods_comment()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#:
+#:
+#:
+procedure z0()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#:
+#:
+#:
+procedure z1()
+    #
+    # do nothing as yet
+    #
+end
+
+#PD:
+#:
+#:
+#:
+procedure z2()
+    #
+    # do nothing as yet
+    #
+end

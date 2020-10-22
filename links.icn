@@ -1,0 +1,24 @@
+link    basename,                       #LK:
+        io,                             #LK:
+        paths,                          #LK:
+        xoptions,                       #LK:
+        escape                          #LK:
+
+#
+# internal application link definitions, all assocciated files that are not
+# included into the source
+#
+link    iconc,                          #LK:
+        records,                        #LK:
+        ca,                             #LK:
+        cfy,                            #LK:
+        help,                           #LK:
+        idol,                           #LK:
+        preproce,                       #LK:
+        parserr,                        #LK:
+        tokens,                         #LK:
+        unilex,                         #LK:
+        tree,                           #LK:
+        unicon,                         #LK:
+        unix,                           #LK:
+        yyerror                         #LK:

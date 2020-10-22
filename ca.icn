@@ -1,0 +1,714 @@
+#LK:
+#: the ucode files that are to be linked into this file
+#:
+link records
+
+#PD:
+#: ca_add_import(fname, ref) - this procedure
+#:
+#:@param fname
+#:@param ref
+#:@fails                if this is called for the interpreter runtime, a
+#:@                     short circuit is done, otherwise it will fail at
+#:@                     the completion of the process.
+#:@aborts
+#:
+procedure ca_add_import(fname, ref)
+    local   i,                          #LV:
+            s,                          #LV:
+            uf                          #LV:
+
+    #
+    # this function is irrelevant to the interpreter runtime system, which is
+    # indicated by the global variable iconc holding a &null value. If we find
+    # that the procedure has run when we are building interpreter code, we
+    # immediately exit with a fail.
+    #
+    if /iconc then {
+        fail
+    }
+    #
+    #
+    #
+    uf := uftbl[fname]
+    #
+    #
+    #
+    if /uf then {
+        write("ca-add-import: \"", fname, "\" not ready.")
+        exit(-1)
+    }
+    #
+    #
+    #
+    s := ""
+    every i := 1 to *uf.imps do {
+        s := uf.imps[i]
+        if (s == ref) then {
+            break
+        }
+    }
+    #
+    #
+    #
+    if not (s == ref) then {
+        put(uf.imps, ref)
+    }
+    #
+    #
+    #
+    ca_import_rslv(ref)
+end
+
+#PD:
+#: ca_add_link(fname, ref)
+#:
+#:@param fname
+#:@param ref
+#:@fails
+#:@aborts
+#:
+procedure ca_add_link(fname, ref)
+    local   i,                          #LV:
+            s,                          #LV:
+            uf                          #LV:
+
+    #
+    # this function is irrelevant to the interpreter runtime system, which is
+    # indicated by the global variable iconc holding a &null value. If we find
+    # that the procedure has run when we are building interpreter code, we
+    # immediately exit with a fail.
+    #
+    if /iconc then {
+        fail
+    }
+    #
+    #
+    #
+    uf := uftbl[fname]
+    #
+    #
+    #
+    if /uf then {
+        write("ca-add-link: \"", fname, "\" not ready.")
+        exit(-1)
+    }
+    #
+    #
+    #
+    s := ""
+    every i := 1 to *uf.lnks do {
+        s := uf.lnks[i]
+        if (s == ref) then {
+            break
+        }
+    }
+    #
+    #
+    #
+    if not (s == ref) then {
+        put(uf.lnks, ref)
+    }
+end
+
+#PD:
+#: ca_add_class(fname, cls)
+#:
+#:@param fname
+#:@param cls
+#:@fails
+#:@aborts
+#:
+procedure ca_add_class(fname, cls)
+    local   uf,                         #LV:
+            clsname,                    #LV:
+            tmp,                        #LV:
+            supers                      #LV:
+
+    #
+    # this function is irrelevant to the interpreter runtime system, which is
+    # indicated by the global variable iconc holding a &null value. If we find
+    # that the procedure has run when we are building interpreter code, we
+    # immediately exit with a fail.
+    #
+    if /iconc then {
+        fail
+    }
+    #
+    #
+    #
+    uf := uftbl[fname]
+    #
+    #
+    #
+    if /uf then {
+        write("ca-add-class: \"", fname, "\" not ready.")
+        exit(-1)
+    }
+    #
+    #
+    #
+    clsname := cls.name
+    #
+    #
+    #
+    supers := list()
+    every tmp := cls.foreachsuper() do {
+        put(supers, tmp)
+    }
+    #
+    #
+    #
+    tmp := ucls(clsname, clsname, &null, supers)
+    put(uf.classes, tmp)
+    put(uf.procs, clsname || "initialize")
+    put(uf.procs, clsname || "__methods")
+    put(uf.procs, clsname || "__mdw_inst_mdw")
+    put(uf.procs, clsname)
+    # write("ca-add-class: \"", clsname, "\" in \"", fname, "\"")
+end
+
+#PD:
+#: ca_add_method(fname, mthd, ctor)
+#:
+#:@param fname
+#:@param mthd
+#:@param ctor
+#:@fails
+#:@aborts
+#:
+procedure ca_add_method(fname, mthd, ctor)
+    local   uf,                         #LV:
+            id                          #LV:
+
+    #
+    # this function is irrelevant to the interpreter runtime system, which is
+    # indicated by the global variable iconc holding a &null value. If we find
+    # that the procedure has run when we are building interpreter code, we
+    # immediately exit with a fail.
+    #
+    if /iconc then {
+        fail
+    }
+    #
+    #
+    #
+    uf := uftbl[fname]
+    #
+    #
+    #
+    if /uf then {
+        write("ca-add-method: \"", fname, "\" not ready.")
+        exit(-1)
+    }
+    #
+    #
+    #
+    if (\ctor) then {
+        put(uf.procs, mthd || "initialize")
+        put(uf.procs, mthd || "__methods")
+        put(uf.procs, mthd || "__mdw_inst_mdw")
+        put(uf.classes, mthd)
+        id := mthd
+    } else {
+        id := mthd.Class.name
+        id := id || "_"
+        id := id || mthd.name
+    }
+    # write("ca-add-method: \"", id, "\" in \"", fname, "\"")
+    #
+    #
+    #
+    put(uf.procs, id)
+end
+
+#PD:
+#: ca_add_pkg(fname, id)
+#:
+#:@param fname
+#:@param id
+#:@fails
+#:@aborts
+#:
+procedure ca_add_pkg(fname, id)
+    local   uf,                         #LV:
+            i,                          #LV:
+            s,                          #LV:
+            prfx                        #LV:
+
+    #
+    # this function is irrelevant to the interpreter runtime system, which is
+    # indicated by the global variable iconc holding a &null value. If we find
+    # that the procedure has run when we are building interpreter code, we
+    # immediately exit with a fail.
+    #
+    if /iconc then {
+        fail
+    }
+    #
+    #
+    #
+    uf := uftbl[fname]
+    #
+    #
+    #
+    if /uf then {
+        write("ca-add-pkg: \"", fname, "\" not ready.")
+        exit(-1)
+    }
+    #
+    #
+    #
+    uf.pkg := id
+    # prepend a pkg-spec to all procs in this ufile
+    # that don't already have one...
+    prfx  := id || "__"
+    every i := 1 to *uf.procs do {
+        s := uf.procs[i]
+        if (match(prfx, s)) then {
+            next
+        }
+        uf.procs[i] := prfx || s
+    }
+end
+
+#PD:
+#: ca_add_proc(fname, id)
+#:
+#:@param fname
+#:@param id
+#:@fails
+#:@aborts
+#:
+procedure ca_add_proc(fname, id)
+    local   uf                          #LV:
+
+    #
+    # this function is irrelevant to the interpreter runtime system, which is
+    # indicated by the global variable iconc holding a &null value. If we find
+    # that the procedure has run when we are building interpreter code, we
+    # immediately exit with a fail.
+    #
+    if /iconc then {
+        fail
+    }
+    #
+    #
+    #
+    uf := uftbl[fname]
+    #
+    #
+    #
+    if /uf then {
+        write("ca-add-proc: \"", fname, "\" not ready.")
+        exit(-1)
+    }
+    #
+    #
+    #
+    if (uf.pkg == "dflt") then {
+        put(uf.procs, id)
+    } else {
+        put(uf.procs, (uf.pkg || "__" || id))
+    }
+    #
+    #
+    #
+    if (id == "main") then {
+        ufmain := uf
+        # write("ca-add-proc: found main in \"", fname, "\"")
+    }
+end
+
+#PD:
+#: ca_assoc(fname, tmpfname) - creates an association between the unicon source
+#: file and the temporary output file that contains the icon output source for
+#: by the compiler iconc. The association is stored in a global table and
+#: contains information on links, procedures, classes, and package name found
+#: in the unicon source file
+#:
+#:@param fname          the unicon source file name. This will be the key
+#:@                     into the global file association table
+#:@param tmpfname       the name of the temporary output file containing
+#:@                     the icon source to be used by the iconc compiler
+#:@fails                if this is called for the interpreter runtime, a
+#:@                     short circuit is done, otherwise it will fail at
+#:@                     the completion of the process.
+#:
+procedure ca_assoc(fname, tmpfname)
+    #
+    # this function is irrelevant to the interpreter runtime system, which is
+    # indicated by the global variable iconc holding a &null value. If we find
+    # that the procedure has run when we are building interpreter code, we
+    # immediately exit with a fail.
+    #
+    if /iconc then {
+        fail
+    }
+    #
+    # we create a record to hold all the associate information that will be
+    # collected during the parse process for use by the iconc compiler. This
+    # record type is ufile, which is describe at the record defineition.
+    #
+    # we then store this record in the global table uftbl with the key being
+    # being the name of the original unicon source file
+    #
+   uftbl[fname] := ufile(tmpfname, [], [], [], [], "dflt")
+end
+
+#PD:
+#: ca_dbg_dump() - this is not used in the current unicon compiler. It can
+#: be used if needing to debug for runnig with the iconc compiler.
+#:
+#:@fails                if this is called for the interpreter runtime, a
+#:@                     short circuit is done, otherwise it will fail at
+#:@                     the completion of the debug data dump
+#:
+procedure ca_dbg_dump()
+    local   i                           #LV:
+            sourcefilename,             #LV: temporary to hold each key from
+                                        #:   the global table uftbl (the
+                                        #:   associations between unicon source
+                                        #:   and iconc source files). This
+                                        #:   will the unicon source filename
+            associatedinfo,             #LV: temporary to hold the associated
+                                        #:   value to the current key of the
+                                        #:   table uftbl
+            ub                         #LV:
+
+    #
+    # this function is irrelevant to the interpreter runtime system, which is
+    # indicated by the global variable iconc holding a &null value. If we find
+    # that the procedure has run when we are building interpreter code, we
+    # immediately exit with a fail.
+    #
+    if /iconc then {
+        fail
+    }
+    #
+    # for each unicon source file stored in the association table, we want
+    # to display the associated information that will be passed to the
+    # iconc compiler.
+    #
+    every sourcefilename := key(uftbl) do {
+        associatedinfo := uftbl[sourcefilename]
+        #
+        # information being displayed is the unicon source filename and the
+        # temporary icon output filename that is passed to iconc
+        #
+        writes("ca-dbg-dump: ", sourcefilename,
+              "\n  maps to ", associatedinfo.tmpnm,
+              "\n  in pkg: ")
+        #
+        # the package name will either be what has been defined by any
+        # "package" directive in the file or it will be "dflt" for all
+        # files that are in the global space. Hence, we just print the
+        # package name found.
+        #
+        write(associatedinfo.pkg)
+        #
+        # we now proceed to display all of the import filenames that have
+        # been found in the unicon source file. If none have been found then
+        # nothing will be printed.
+        #
+        every write("    imports ", associatedinfo.imps[1 to *associatedinfo.imps])
+        #
+        # display all the link filenames that have been found in the unicon
+        # source file. If none have been found then nothing will be printed.
+        #
+        every write("    links ", associatedinfo.lnks[1 to *associatedinfo.lnks])
+        #
+        # display all the class names that have been defined in the unicon
+        # source file. If none have been found then nothing will be printed.
+        #
+        every write("    class ", associatedinfo.classes[1 to *associatedinfo.classes].name)
+        #
+        # display all the procedures that have been defined in the unicon
+        # source file. If none have been found then nothing will be printed.
+        #
+        every write("    proc ", associatedinfo.procs[1 to *associatedinfo.procs])
+    }
+    #
+    # write bundles
+    #
+    every i := 1 to *ubndls do {
+        ub := ubndls[i]
+        write("bundle \"", ub.name, "\"",
+              "\n  type: ", ub.typ)
+              "\n  ent: ", ub.entry)
+    }
+end
+
+$ifdef _MS_WINDOWS_NT
+$define PATHCHAR "\\"
+$else
+$define PATHCHAR "/"
+$endif
+
+#PD:
+#: ca_import_rslv(name)
+#:
+#:@param name
+#:@fails                if this is called for the interpreter runtime, a
+#:@                     short circuit is done.
+#:@returns              &null is returned at the completion of resolving
+#:@                     the imports
+#:
+procedure ca_import_rslv(name)
+    local   i,                          #LV:
+            bndl                        #LV:
+    static  sep,                        #SV:
+            ipaths                      #SV:
+
+    initial {
+        sep := PATHCHAR
+        ipaths := ipaths_get()
+    }
+    #
+    # this function is irrelevant to the interpreter runtime system, which is
+    # indicated by the global variable iconc holding a &null value. If we find
+    # that the procedure has run when we are building interpreter code, we
+    # immediately exit with a fail.
+    #
+    if /iconc then {
+        fail
+    }
+    # see if we have this bundle already
+    every i := 1 to *ubndls do {
+        bndl := ubndls[i]
+        if not (bndl.typ == "imp") then {
+            next
+        }
+        if (bndl.name == name) then {
+            # this imp-ref already resolved
+            return
+        }
+    }
+    #
+    #
+    #
+    bndl := ubndl("imp", name)
+    every i := 1 to *ipaths do {
+        if not (f := open(ipaths[i] || sep || "uniclass", "dr")) then {
+            next
+        }
+        if not (entry := fetch(f, name)) then {
+            close(f)
+            f := &null
+            next
+        }
+        close(f)
+        break
+    }
+    #
+    #
+    #
+    if (i = *ipaths & /f) then {
+        fail
+    }
+    # write("ca-import-rslv: ")
+    # write("name: ", name)
+    # write("entry: ", entry)
+    bndl.entry := entry
+    get_classinfo_for_bundle(bndl)
+    put(ubndls, bndl)
+    return
+end
+
+#PD:
+#: ca_linkref_rslv(name)
+#:
+#:@param name
+#:@fails                does nothing and always fails
+#:
+procedure ca_linkref_rslv(name)
+end
+
+#PD:
+#: ca_init() - this procedure initialises the global variables uftbl and
+#: ubndls
+#:
+#:@fails                at completion of initialisation process it always fails
+#:
+procedure ca_init()
+   uftbl := table()
+   ubndls := list()
+end
+
+#PF:
+#: ca_write(fname, firstperi)
+#:
+#:@param fname
+#:@param firstperi
+#:@fails                if this is called for the interpreter runtime, a
+#:@                     short circuit is done, otherwise it will fail at
+#:@                     the completion of the process.
+#:@aborts               if it cannot open the file associated with the
+#:@                     supplied filename
+procedure ca_write(fname, firstperi)
+   local f, i, j, k, s, uf, cls, spr
+
+   if /iconc then
+      fail
+   f := open(fname, "w") | {
+      write("ca-write: open failure: ", fname)
+      exit(-1)
+      }
+   write(f, "firstperi:", firstperi, "-iconc")
+   every k := key(uftbl) do {
+      uf := uftbl[k]
+      write(f, "file:", uf.tmpnm, "-iconc ", k)
+      if (/uf.pkg | (*uf.pkg = 0)) then
+         s := "dflt"
+      else
+         s := uf.pkg
+      write(f, "Pkg:", s)
+      every i := 1 to *uf.imps do
+         write(f, "imp:", uf.imps[i])
+      every i := 1 to *uf.lnks do
+         write(f, "lnk:", uf.lnks[i])
+      every i := 1 to *uf.procs do
+         write(f, "prc:", uf.procs[i])
+      every i := 1 to *uf.classes do {
+         cls := uf.classes[i]
+         write(f, "Class:", cls.name)
+         every j := 1 to *cls.supers do {
+            spr := cls.supers[j]
+            write(f, "super:", spr)
+            }
+         }
+      }
+   # write bundles
+   every i := 1 to *ubndls do {
+      b := ubndls[i]
+      write(f, "bndl:", b.name) # , " ", b.entry)
+      every k := 1 to *b.classes do {
+         c := b.classes[k]
+         write(f, "clss:", c.fullname)
+         write(f, c.entry[1:-1])
+         }
+      }
+   write(f, "end:")
+   close(f)
+end
+
+# record ucls(name, fullname, mthds, flds, supers)
+
+#PD:
+#: get_classinfo_for_bundle(bndl)
+#:
+#:@param bndl
+#:@fails
+#:@aborts
+#:
+procedure get_classinfo_for_bundle(bndl)
+   local i, clsnms, entry
+
+   if /iconc then
+      fail
+   clsnms := list()
+   bndl.classes := list()
+   # write("ca.get-classinfo-for-bundle(", bndl.name, ")")
+   bndl.entry ? {
+      tab(upto("("))
+      tab(many("( "))
+      while (put(clsnms, tab(upto(",")))) do
+         tab(many(", "))
+      put(clsnms, tab(find(")")))
+      }
+   every i := 1 to *clsnms do {
+      # write("  \"", clsnms[i], "\"")
+      if (entry := lkup_class(bndl.name, clsnms[i])) then {
+         # write("    a class")
+         # write("    ", entry)
+         cls := ucls(clsnms[i], bndl.name || "__" || clsnms[i], entry)
+         put(bndl.classes, cls)
+$ifdef JustWritingEntryOutNow
+         s := entry[find("class", entry):0]
+         s ? {
+            # scan for superclasses
+            tab(upto(":"))
+            tab(many(": "))
+            while (put(cls.supers, tab(upto(":")))) do
+               tab(many(": "))
+            put(cls.supers, tab(upto("(")))
+            tab(many("("))
+            # scan for membervars
+            while (put(cls.flds, tab(upto(",")))) do
+               tab(many(", "))
+            put(cls.flds, tab(upto(")")))
+            tab(many(")"))
+            # scan for methods
+            tab(many("\n"))
+            while (put(cls.mthds, tab(upto("\n")))) do
+               tab(many("\n "))
+            }
+         # write("     has ", *cls.supers, " supers")
+         every sup := 1 to *cls.supers do
+            # write("      \"", cls.supers[sup], "\"")
+
+         # write("     has ", *cls.flds, " fields")
+         every sup := 1 to *cls.flds do
+            # write("      \"", cls.flds[sup], "\"")
+
+         # write("     has ", *cls.mthds, " methods")
+         every sup := 1 to *cls.mthds do
+            # write("      \"", cls.mthds[sup], "\"")
+         put(bndl.classes, cls)
+$endif #JustWritingEntryOutNow
+         }
+      else {
+         # write("    not found (a symbol?)")
+         }
+      entry := &null
+      }
+end
+
+#PD:
+#: lkup_class_old(name)
+#:
+#:@param name
+#:@fails
+#:@aborts
+#:
+procedure lkup_class_old(name)
+   local i, entry
+   static sep, ipaths
+
+   initial {
+      sep := PATHCHAR
+      ipaths := ipaths_get()
+      }
+   if /iconc then
+      fail
+   every i := 1 to *ipaths do {
+      if not (f := open(ipaths[i] || sep || "uniclass", "dr")) then
+         next
+      if not (entry := fetch(f, name)) then {
+         close(f)
+         f := &null
+         next
+         }
+      close(f)
+      return entry
+      }
+   fail
+end
+
+#PD:
+#: lkup_class(pkg, name)
+#:
+#:@param pkg
+#:@param name
+#:@fails
+#:@aborts
+#:
+procedure lkup_class(pkg, name)
+   local dbent
+
+#   dbent := fetchspec(name | (pkg || "__" || name)) | fail
+   if /iconc then
+      fail
+   dbent := fetchspec(pkg || "__" || name) | fail
+   return dbent.entry
+end

@@ -1,0 +1,2344 @@
+#
+# verified to revision 5969 - use svn blame unilex.icn &>unilex.blame to get new revisions
+# have added the regexp changes not included in the main repository
+#
+
+#
+# A hand-written lex(1)-compatible Unicon lexer.
+#
+
+link escape
+
+#$define debuglex 1
+$ifndef NoPatternIntegration
+$define PatternIntegration 1
+$endif
+
+global  yytext,                         #GV: this variable holds the current
+                                        #:   text that has been collected during
+                                        #:   the token processing in the current
+                                        #:   lexer being used.
+        yyin,                           #GV: this variable holds either the current
+                                        #:   file being parsed or a list of the
+                                        #:   previously read files for which there
+                                        #:   $include statements found.
+        yytoken,                        #GV: holds the current token that has been
+                                        #:   found by the current lexer in use. The
+                                        #:   value will aslways be a token record.
+        debuglex                        #GV: if the lexer is to be debugged, set this
+                                        #:   to any non-null value.
+
+global  OctalCharacters,                #GV: cset of octal digits
+        DecimalCharacters,              #GV: cset of decimal digits
+        LetterCharacters,               #GV: cset of letters, includes "_",
+                                        #:   valid first character of identifiers
+        HexadecimalCharacters,          #GV: cset of hexadecimal digits
+        RadixNumberCharacters,          #GV: cset of digits and letters, used
+                                        #:   for radix defined numbers
+        FS,                             #GV: Not used
+        IS,                             #GV: Not used
+        WhitespaceCharacters,           #GV: cset of whitespace characters
+        idchars                         #GV: cset of valid characters used in
+                                        #:   identifiers from 2nd character on
+
+global  errors                          #GV: holds a count of the current number of
+                                        #:   errors that have been found by both the
+                                        #:   lexer and parser.
+
+#
+# global variable to reference relvant lexer procedure
+#
+global  yylex2                          #GV: This variable holds the current lexer
+                                        #:   in use. Allows for specialised lexers
+                                        #:   to be incorporated as required. In
+                                        #:   the current case allows for a
+                                        #:   specialised lexer to be used for regex.
+
+# E                       [Ee][+-]?{D}+
+#
+
+#
+# tokens are records mainly for historical reasons at this point.
+# unilex.icn can probably still be compiled with icont, simplifying
+# bootstrapping, but if not for that, token should become a class.
+#
+
+#RD:
+#: token() - contains the collected information for a token. It will include a
+#: taken type, the string value of the token, the line number/column number and
+#: the filename in which the token has been found. Within the code, certain tokens
+#: are generated which are not actually found in the source code (list comprehensions
+#: are one such code example) and the line number/column number and source are a
+#: set of values that indicate this. The source filename in these cases is "__faux.icn"
+#:
+record token(
+    tok,                                #RF: the token type for this token,
+                                        #:   see the token type codes as found
+                                        #:   in the source file ytab_h.icn.
+    s,                                  #RF: string representation of the token
+    line,                               #RF: line number in the source code
+                                        #:   where this token has been found
+    column,                             #RF: column that is the start of the token
+    filename                            #RF: name of the source file in which
+                                        #:   token has occurred
+)
+
+#PD:
+#: init_csets() - a procedure to initialise a number of global variables
+#: to hold the various csets that will be used in scanning for the next
+#: token in the input source. The original names used in the code were
+#: cryptic single character names. They have been renamed to reflect what
+#: they actually represent. An example of this is O being renamed to
+#: OctalCharacters. A number of these were not actually used in the lexer
+#: or eleswhere in the compiler.
+#:
+#: The value associated with RadixNumberCharacters and its need within the
+#: lexer has changed. A different process has been used to determine if a
+#: radix defined number is valid or not. The original code left this up to
+#: the icont compiler to determine if it was of the correct format. The
+#: unicon compiler now determines this, in part for the preparation of the
+#: unicon compiler to take on more functionality.
+#:
+procedure init_csets()
+    OctalCharacters  := '01234567'      #GI: We set the global variable to hold
+                                        #:   those characters that are valid for
+                                        #:   octal digits (01234567).
+                                        #:
+    DecimalCharacters  := &digits       #GI: We set the global variable to hold
+                                        #:   those characters that are valid for
+                                        #:   decimal digits (0123456789)
+                                        #:
+    LetterCharacters  := &letters ++ '_'
+                                        #GI: We set the global variable to hold
+                                        #:   those characters that are valid
+                                        #:   letter characters. This will include
+                                        #:   both lower and upper case latin alphabet
+                                        #:   characters and the underscore character (_)
+                                        #:
+    HexadecimalCharacters  := &digits ++ 'abcdefABCDEF'
+                                        #GI: We set the global variable to hold
+                                        #:   those characters which are valid
+                                        #:   hexadecimal characters. This includes
+                                        #:   the decimal characters and the lower and upper
+                                        #:   case letters (abcdefABCDEF)
+                                        #:
+    RadixNumberCharacters  := &digits ++ &letters
+                                        #GI: In relation to the radix defined numbers,
+                                        #:   the base for these numbers ranges from 2 to
+                                        #:   36. As such, we use the letters to represent
+                                        #:   the relevant additional characters needed for
+                                        #:   all bases above 10. Hexadecimla will be
+                                        #:   included as well as being previously defined.
+                                        #:   We set the global variable to handle the entire
+                                        #:   possible range of characters required (determined
+                                        #:   by base 36) and this will include the decimal digits
+                                        #:   and the lower and upper case latin letters.
+                                        #:
+    #FS := 'fFlL'               # Not used anywhere
+    #IS := 'uUlL'               # Not Used anywhere
+    WhitespaceCharacters  := ' \t\v'    #GI: We set the global variable to the valid whitespace
+                                        #:   characters, which are the space, tab and vertical tab
+                                        #:   characters
+                                        #:
+    idchars := LetterCharacters ++ DecimalCharacters
+                                        #GI: We set the global variable to the valid identifier
+                                        #:   characters (position 2 onwards) which include the
+                                        #:   upper and lower case latin characters, the decimal
+                                        #:   digits and the underscore character
+                                        #:
+end
+
+$include "ytab_h.icn"
+
+global  yylineno,                       #GV: this will hold the currentline number in the
+                                        #:   current file being processed.
+                                        #:
+        yycolno,                        #GV: this will hold the current column number in
+                                        #:   the current line being processed.
+                                        #:
+        yyfilename                      #GV: this is the name of the current file being
+                                        #:   processed
+                                        #:
+
+global  tokflags                        #GV: the tokflags will tell you whether
+                                        #:   the token can start an expression
+                                        #:   or end an expression, as well as
+                                        #:   whether a newline was seen since
+                                        #:   the last token
+                                        #:
+#
+# since an identifier token (as either a reserved word or an actual identifier)
+# can be the start of some parse expression or it can end a parse
+# expression or be neither, instead of just using "magic" numbers to indicate
+# this, we will give decsriptive names to these values. We use the following defines
+# to specify the relevant values. Since these are flag values, we make sure that
+# each defined value is a power of 2 to specify the bit needed.
+#
+$define Neither     0                   #GD: the token is not found at the beginning
+                                        #:   or the ending of a parse expression
+$define Beginner    1                   #GD: the token can begin a parse expression
+$define Ender       2                   #GD: the token can end a parse expression
+$define Newline     4                   #GD: the newline character has been found
+
+
+global  lastid                          #GV: This global does not appear to be used in the source code.
+
+global  buffer                          #GV: holds the current text being parsed.
+global  lastchar                        #GV: This global is initialised but is not otherwised used.
+
+#PD:
+#: reswords() - this procedure is only ever called once and in the calling of it,
+#: the global variable which initially holds the procedure value as defined in
+#: the code below is overwritten by the results returned by this procedure.
+#: Thereafter, reswords holds a table value and for all intents and purposes
+#: the procedure value is no longer accessible.
+#:
+procedure reswords()
+static t
+initial {
+    t := table([Beginner+Ender, IDENT])
+
+    t["abstract"]   := [Neither,        ABSTRACT    ]
+    t["break"]      := [Beginner+Ender, BREAK       ]
+    t["by"]         := [Neither,        BY          ]
+    t["case"]       := [Beginner,       CASE        ]
+    t["class"]      := [Neither,        CLASS       ]
+    t["create"]     := [Beginner,       CREATE      ]
+    t["critical"]   := [Beginner,       CRITICAL    ]
+    t["default"]    := [Beginner,       DEFAULT     ]
+    t["do"]         := [Neither,        DO          ]
+    t["else"]       := [Neither,        ELSE        ]
+    t["end"]        := [Beginner,       END         ]
+    t["every"]      := [Beginner,       EVERY       ]
+    t["fail"]       := [Beginner+Ender, FAIL        ]
+    t["global"]     := [Neither,        GLOBAL      ]
+    t["if"]         := [Beginner,       IF          ]
+    t["import"]     := [Neither,        IMPORT      ]
+    t["initial"]    := [Beginner,       iconINITIAL ]
+    t["initially"]  := [Ender,          INITIALLY   ]
+    t["invocable"]  := [Neither,        INVOCABLE   ]
+    t["link"]       := [Neither,        LINK        ]
+    t["local"]      := [Beginner,       LOCAL       ]
+    t["method"]     := [Neither,        METHOD      ]
+    t["next"]       := [Beginner+Ender, NEXT        ]
+    t["not"]        := [Beginner,       NOT         ]
+    t["of"]         := [Neither,        OF          ]
+    t["package"]    := [Neither,        PACKAGE     ]
+    t["procedure"]  := [Neither,        PROCEDURE   ]
+    t["record"]     := [Neither,        RECORD      ]
+    t["repeat"]     := [Beginner,       REPEAT      ]
+    t["return"]     := [Beginner+Ender, RETURN      ]
+    t["static"]     := [Beginner,       STATIC      ]
+    t["suspend"]    := [Beginner+Ender, SUSPEND     ]
+    t["then"]       := [Neither,        THEN        ]
+    t["thread"]     := [Beginner,       THREAD      ]
+    t["to"]         := [Neither,        TO          ]
+    t["until"]      := [Beginner,       UNTIL       ]
+    t["while"]      := [Beginner,       WHILE       ]
+}
+    return t
+end
+
+#PD:
+#: lex_error() - print a message when a token is not recognised. This is
+#: not used in the compiler. It does however, appear in the Robert Parlett parser
+#: application. The replacement for this is the uni_error procedure. This code should
+#: be cleaned up in all systems that use the lexer processes.
+#:
+procedure lex_error()
+    yyerror("token not recognized")
+end
+
+#PD:
+#: uni_error(s) - print and count the error messages being printed. If
+#: called with no parameter, a standard error message is displayed.
+#:
+#:@param s          string message to be displayed
+#:@fails            always fails, returns no results.
+#:
+procedure uni_error(s)
+    #
+    # if errors is not initialised, set the value to 0
+    #
+    /errors := 0
+    #
+    # if no message is supplied, set the value to a standard message
+    #
+    /s := "token not recognized"
+    write("uni_error calls yyerror ", image(s))
+    yyerror(s)
+    errors +:= 1
+end
+
+#PD:
+#: dyslexia() - print a message in those cases which have caused problems
+#: in coding previously. These are in the event that a misunderstanding
+#: has occured or a typo has occurred, but the order is still legal unicon
+#: source.
+#:
+#: An example is the occurrence of :+ (as in [i:+j]) which is legal but
+#: what was wanted was +: instead (as in [i+:j]).
+#:
+#: This will print out a warning message to &errout but will not stop the
+#: compilation from occurring.
+#:
+procedure dyslexia()
+    static  messages                    #SV: this will hold a table of
+                                        #:   possible character sequences
+                                        #:   and the associated warnings
+    local   testing_value,              #LV: temporary to hold the current
+                                        #:   key sequence from messages
+            current_pos                 #LV: the current position in the
+                                        #:   source being examined. This is
+                                        #:   used to reset the scanning
+                                        #:   position for the actual token
+                                        #:   scanning.
+
+    #
+    # initialise the different kinds of possible errors though legal unicon
+    #
+    initial {
+        messages := table()
+        messages[":+"] := "token may be malformed, did you mean +: ?"
+        messages[":-"] := "token may be malformed, did you mean -: ?"
+        messages["&&"] := "pattern operator && is non-standard, did you mean & ?"
+        messages["keys"] := "identifier may be malformed, did you mean \"key\" ?"
+        messages["procs"] := "identifier may be malformed, did you mean \"proc\" ?"
+    }
+    #
+    # we test each of the test strings against the current position which
+    # is 1 character back from the &pos and if found print a warning and
+    # exit loop
+    #
+    current_pos := &pos - 1
+    every testing_value := key(messages) do {
+        #
+        # this is to ensure that the testing position is always the same
+        # position each time.
+        #
+        &pos := current_pos
+        if =testing_value then {
+            warning(messages[testing_value], yylineno, yyfilename, testing_value)
+            break
+        }
+    }
+    #
+    # always restore the position for scanning back to the original value
+    # that &pos had before entry to this procedure
+    #
+    &pos := current_pos + 1
+end
+
+#PD:
+#: yylex2Normal() - The original lexer procedure has been renamed from
+#: yylex2 to yylex2Normal to allow for multiple lexers to be used within
+#: the unicon compiler. This was brought about because of the use of a
+#: sub-langauge for the regex facilities being introduced. The alternate
+#: lexers can then be initiated by a specific token within the grammar.
+#:
+#: This is the standard unicon lexer.
+#:
+procedure yylex2Normal()
+    local   new_filename                #LV: a temporary used in determining
+                                        #:   if a new filename has been
+                                        #:   specified in the source code
+                                        #:   via the use of a #line directive
+    static  punc_table                  #SV: holds a table that points to
+                                        #:   the appropriate procedure for
+                                        #:   handling the next token to be
+                                        #:   found in the input based on
+                                        #:   the current character that has
+                                        #:   been seen in the input source
+
+    initial {
+        #
+        # set up a number of csets that will be used in the string scanning
+        # processes for determining the next token in the input source.
+        #
+        init_csets()
+        #
+        # this uses the specific functionality of the unicon/icon language that
+        # all procedure definitions automatically create a global variable whose value
+        # can then be overwritten (hence, losing access to the original function). We
+        # do this here to have the global variable hold a special table which
+        # will return a 2 element list about the kind of identifier token found. This
+        # is applicable to both reserved words and all other identifiers that
+        # are valid within the unicon language. The first element of the list
+        # gives information about whether this identifier can start or finish
+        # an expression after/before a new line is encountered. The second
+        # element of the list is the applicable identifier/reserved word lexical
+        # type that will be used by the parser.
+        #
+        reswords := reswords()
+        #
+        # as we encounter a character in the input, we can use this to select
+        # the specific lexical procedure to handle the various associated lexical entities.
+        # if the character found is not a valid identifier or other symbol,
+        # a specific error procedure will be called to handle this situation
+        #
+        punc_table := table(uni_error)
+        punc_table["'"]     := do_literal
+        punc_table["\""]    := do_literal
+        punc_table["!"]     := do_bang
+        punc_table["%"]     := do_mod
+        punc_table["&"]     := do_and
+        punc_table["*"]     := do_star
+        punc_table["+"]     := do_plus
+        punc_table["-"]     := do_minus
+        punc_table["."]     := do_dot
+        punc_table["/"]     := do_slash
+        punc_table[":"]     := do_colon
+        punc_table["<"]     := do_less
+        punc_table["="]     := do_equal
+        punc_table[">"]     := do_greater
+        punc_table["?"]     := do_qmark
+        punc_table["@"]     := do_at
+        punc_table["\\"]    := do_backslash
+        punc_table["^"]     := do_caret
+        punc_table["|"]     := do_or
+        punc_table["~"]     := do_tilde
+        punc_table["("]     := do_lparen
+        punc_table[")"]     := do_rparen
+        punc_table["["]     := do_lbrack
+        punc_table["]"]     := do_rbrack
+        punc_table["{"]     := do_lbrace
+        punc_table["}"]     := do_rbrace
+        punc_table[","]     := do_comma
+        punc_table[";"]     := do_semi
+        punc_table["$"]     := do_dollar
+        punc_table["`"]     := do_backquote
+        every punc_table[!DecimalCharacters] := do_digits
+        every punc_table[!LetterCharacters] := do_letters
+    }
+
+    yycolno +:= *yytext
+
+    repeat {
+        if pos(0) then {
+            fail
+        } else if ="#" then {
+            if ="line " then {
+                if yylineno := integer(tab(many(&digits))) then {
+                    =" \""
+                    new_filename := tab(find("\"")|0)
+                    if *new_filename > 0 then {
+                        yyfilename := new_filename
+                    }
+                }
+            }
+            tab(find("\n") | 0)
+        } else if ="\n" then {
+            yylineno +:= 1
+            yycolno := 1
+            if tokflags < Newline then {
+                tokflags +:= Newline
+            }
+        } else if tab(any(' ')) then {
+            yycolno +:= 1;
+        } else if tab(any('\v\^l')) then {
+            # skip these
+        } else if tab(any('\t')) then {
+            yycolno +:= 1
+            while (yycolno-1) % 8 ~= 0 do {
+                yycolno +:= 1
+            }
+        } else {
+            yytext := move(1)
+            #
+            # could we put a test in here for the various kinds of oopsies that
+            # Clinton was talking about in his email.
+            #
+            dyslexia()
+            #
+            # the actual scanning for the next token
+            #
+            if rv := punc_table[yytext]() then {
+                return rv
+            }
+        }
+    }
+end
+
+###############################################################################
+###############################################################################
+#
+#   New regex lexer - switched on by the grammar reaching the specific production
+#   that starts the regex grammar rules
+#
+#   This is the example using < and >
+#
+#   The normal lexer is switched backed when the REGEXEND token is encountered
+#   and returned to the parser.
+#
+###############################################################################
+
+#
+#   The global variables below are used by the regex lexer to handle various
+#   conditions within a regex
+#
+#
+global  regexskipchars,                 #GV: holds the cset of special characters that
+                                        #:   represent various regex controls, included
+                                        #:   in this cset is the character that starts
+                                        #:   the REGEXEND delimiter,
+                                        #:
+        debugwrite,                     #GV: used to hold the debugging fuction when
+                                        #:   testing the lexer after making changes,
+                                        #:   the value is either write or 1. In normal
+                                        #:   running, this value is 1
+                                        #:
+        regexintlit,                    #GV: this is a flag to indicate that the next
+                                        #:   set of characters are to an integer literal
+                                        #:
+        regexnoskip                     #GV: this is a flag to indicate whether or not
+                                        #:   to collect following characters into a single
+                                        #:   string value
+                                        #:
+
+#PD:
+#: yylex2Regex() - This is the replacement lexer that is used when the regex
+#: expressions are being processed. The global variable yylex2 is assigned this
+#: procedure value on entry into the regex during parsing.
+#:
+procedure yylex2Regex()
+    static  punc_table                  #SV:
+
+    initial {
+        #
+        # each of the keys is one of the special characters recognised by the
+        # regex lexer. All characters not as leys use the standard lexer routine
+        #
+        punc_table := table(do_regexp_common)
+        punc_table["\\"]    := do_regexp_backslash
+        punc_table["["]     := do_regexp_lbrack
+        punc_table["]"]     := do_regexp_rbrack
+        punc_table["("]     := do_regexp_lparen
+        punc_table[")"]     := do_regexp_rparen
+        punc_table["{"]     := do_regexp_lbrace
+        punc_table["}"]     := do_regexp_rbrace
+        punc_table["*"]     := do_regexp_star
+        punc_table["+"]     := do_regexp_plus
+        punc_table["|"]     := do_regexp_bar
+        punc_table["?"]     := do_regexp_qmark
+        punc_table["^"]     := do_regexp_caret
+        punc_table["."]     := do_regexp_dot
+        punc_table["-"]     := do_regexp_hyphen
+        punc_table["\""]    := do_regexp_quote
+        #
+        # These are the relevant rountines that are used to determine when the
+        # regex is terminated. During testing the symbols (: and :) were used as
+        # the designators. Normal usage uses < and >.
+        #
+        #punc_table[":"]     := do_regexp_colon
+        punc_table[">"]     := do_regexp_nmgt
+    }
+    #
+    # When debugging changes to the lexer, uncomment the following assignment
+    # to get debugging output from the lexer.
+    #
+    #debugwrite := write
+    #
+    # In normal operation the following assignment ensures that no debugging
+    # output occurs
+    #
+    debugwrite := 1
+    #
+    # The basic design of the regex lexer is that each character is returned to
+    # the parser for handling by the parser. However, this leads to a greatly
+    # increase number of pattern matching calls that will be run at runtime.
+    # To reduce the number of pattern matching calls, a sequence of non-special
+    # characters can be returned as a single string. This assignment is used to
+    # determine when a group of characters can be grouped together. Non-special
+    # characters include all the non-printable control characters, including newline.
+    #
+    #regexskipchars := '\\[]{}()*+?:.^|-"'  # use if ending symbol starts with :
+    regexskipchars := '\\[]{}()*+?>.^|-"'   # use if ending symbol is >
+
+    yycolno +:= *yytext
+    debugwrite("yylex2Regex: yytext:\"", yytext, "\"")
+    if pos(0) then {
+        fail
+    }
+    yytext := move(1)
+    debugwrite("yylex2Regex: yytext:\"", yytext, "\"")
+    if yytext == "\n" then {
+        yylineno +:= 1
+        yycolno := 1
+    }
+    if rv := punc_table[yytext]() then {
+        debugwrite("yylex2Regex: rv:", rv, " yytext:\"", yytext, "\"")
+        return rv
+    }
+end
+
+#PD:
+#: do_regexp_common() - This procedure handles all characters that are not
+#: special regex characters
+#:
+procedure do_regexp_common()
+    local   i,                          #LV: used to locate the end of string
+                                        #:   to be returned
+            j                           #LV: used to locate the start of the
+                                        #:   collected string, if more than one
+                                        #:   character is selected.
+
+    #
+    # This handles the creation of an INTLIT token that is found in the regex
+    # expression form {n}. At present, this code only allows a single integer
+    # value to be used in the {n} form
+    #
+    if \regexintlit then {
+        yytext ||:= tab(many(&digits))
+        regexintlit := &null
+        debugwrite("do_regexp_common: digits:", yytext)
+        return INTLIT
+    }
+    debugwrite("do_regexp_common: regexskip:", \regexskip | "&null")
+    #
+    # The following assignment is used to determine if multiple characters have
+    # been collected. If there are, the position will be after the current &pos
+    #
+    j := &pos
+    debugwrite("do_regexp_common: skip j:", j)
+
+    #
+    # We can collect as many characters as possible to return as a string value
+    #
+    if /regexnoskip then {
+        debugwrite("do_regexp_common: skip:\"", yytext,"\"")
+        #
+        # are there a number of characters to collect?
+        #
+        i := upto(regexskipchars)
+        #
+        # if so we can collect them together
+        #
+        if i > j then {
+            debugwrite("do_regexp_common: skip:", i)
+            #
+            # But make sure that the character follwing these are not one of
+            # *, + or ?, as these will require the last character to removed
+            # from the string
+            #
+            if &subject[i] == ("*" | "+" | "?") then {
+               i -:= 1
+               debugwrite("do_regexp_common: skip:", i)
+            }
+            #
+            # now we collect those characters, if any of those characters are
+            # non-printable, they will be converted into a printable escaped
+            # form by the use of the internal function image().
+            #
+            yytext ||:= tab(i)
+            #
+            #
+            yytext := image(yytext)[2:-1]
+            debugwrite("do_regexp_common: skip:\"", yytext, "\"")
+            #
+            # set the flag so that we don't try to collect any more until the
+            # special characters found have been processed.
+            #
+            regexnoskip := 1
+        }
+    } else {
+        debugwrite("do_regexp_common: skip:\"", yytext, "\"")
+        #
+        # if the flag has been set, reset it
+        #
+        regexnoskip := &null
+    }
+    return REGEXCHAR
+end
+
+#PD:
+#: do_regexp_colon() - this procedure was used when the regex ender was set to :).
+#: The code is left in as an example of how to change the regex ender string. If
+#: the following character is not a ) then just return the value as a normal REGEXCHAR.
+#:
+procedure do_regexp_colon()
+    if yytext ||:= =")" then {
+        yylex2 := yylex2Normal
+        tokflags +:= Ender
+        regexnoskip := &null
+        return REGEXEND
+    }
+    return REGEXCHAR
+end
+
+#PD:
+#: do_regexp_nmgt() - This is the normal REGEXEND processing code.
+#:
+procedure do_regexp_nmgt()
+    #
+    # we need to reset the lexer being used to the normal unicon/icon lexer.
+    # we do it hhere as this is where we have found the terminating character for
+    # the regex processing. the procedure above [do_regexp_colon] gives an example
+    # of how to deal with a multi-character termination string. This procedure
+    # is the example to use if an alternative regex ending charcater is used. It
+    # does need to be co-ordinated with the appropriate changes in the grammar. See
+    # the non-terminal definiton for [expr11] in the appropriate [.y] file.
+    #
+    yylex2 := yylex2Normal
+    tokflags +:= Ender
+    regexnoskip := &null
+    return REGEXEND
+end
+
+#PD:
+#: convert_backslash() - This procedure handles the processing of escapes of characters.
+#: The handling of \xhh and \^c and \ddd is now done. Each form is converted to
+#: the actual character and then back to the escaped form as designated by the
+#: internal function image(). If the character that has been
+#: escaped is not one of the designated escape characters then just return the
+#: the character as itself.
+#:
+#: We treat " and ' as special cases because of their use in strings, csets and regexes.
+#:
+procedure convert_backslash()
+    static  conversion_set              #SV: holds the default escaped conversion
+                                        #:   strings
+    local   ch,                         #LV: temporary to hold a character being tested
+            ch2,                        #LV: temporary to hold a following character being tested
+            rval                        #LV: hold the value to be returned
+
+    initial {
+        #
+        # The backslash is escaped so as to allow the correct processing by the
+        # icont compiler.
+        #
+        conversion_set := table()
+        conversion_set["\\"]    := "\\\\"
+        conversion_set["b"]     := "\\b"
+        conversion_set["d"]     := "\\d"
+        conversion_set["e"]     := "\\e"
+        conversion_set["f"]     := "\\f"
+        conversion_set["l"]     := "\\l"
+        conversion_set["n"]     := "\\n"
+        conversion_set["r"]     := "\\r"
+        conversion_set["t"]     := "\\t"
+        conversion_set["v"]     := "\\v"
+        conversion_set["\""]    := "\\\""
+        conversion_set["\'"]    := "\\\'"
+
+    }
+    # need to handle \x and \^ as both of these are possible character definitions
+    #
+    # find out what character we have escaped
+    #
+    ch := move(1)
+    if ch == "x" then {
+        if member(HexadecimalCharacters, &subject[&pos:&pos + 1]) then {
+            ch := move(1)
+        }
+        if member(HexadecimalCharacters, &subject[&pos:&pos + 1]) then {
+            ch ||:= move(1)
+        }
+        #
+        # convert the hex characters to the equivalent integer value and then
+        # to the specific character. image() will convert the character to a
+        # standard format
+        #
+        rval := image(char(integer("16r" || ch)))[2:-1]
+    } else if ch == "^" then {
+        ch := move(1)
+        #
+        # convert the control characters to the equivalent integer value using
+        # the lower 5 bits and then to the specific character. image() will
+        # convert the character to a standard format
+        #
+        rval := image(char(iand(ord(ch), 31)))[2:-1]
+    } else if member(OctalCharacters, ch) then {
+        if member(OctalCharacters, &subject[&pos:&pos + 1]) then {
+            ch ||:= move(1)
+        }
+        if member(OctalCharacters, &subject[&pos:&pos + 1]) then {
+            ch ||:= move(1)
+        }
+        #
+        # convert the octal characters to the equivalent integer value and then
+        # to the specific character. image() will convert the character to a
+        # standard format
+        #
+        rval := image(char(integer("8r" || ch)))[2:-1]
+    } else {
+        #
+        # set the text to either the correct encoding or just the character itself
+        #
+        rval := (\conversion_set[ch] | ch )
+        #
+    }
+    return rval
+end
+
+#PD:
+#: do_regexp_backslash() - this procedure handles the backslash processing for
+#: the regex lexer
+#:
+procedure do_regexp_backslash()
+    yytext := convert_backslash()
+    # we need to reset the no skip condition and return a REGEXCHAR
+    #
+    regexnoskip := &null
+    return REGEXCHAR
+end
+
+#PD:
+#: do_regexp_quote() - this procedure converts a " character into the encoded
+#: format for the pattern matching routines.
+#:
+procedure do_regexp_quote()
+    yytext := "\\\""
+    regexnoskip := &null
+    return REGEXCHAR
+end
+
+#
+# each of the following procedures returns the specific code for the special
+# character found and resets the no skip condition.
+
+#PD:
+#: do_regexp_star() - processes the regex * postfix operator
+#:
+#:
+procedure do_regexp_star()
+    regexnoskip := &null
+    return REGEXSTAR
+end
+
+#PD:
+#: do_regexp_plus() - processes the regex + postfix operator
+#:
+procedure do_regexp_plus()
+    regexnoskip := &null
+    return REGEXPLUS
+end
+
+#PD:
+#: do_regexp_bar() - processes the regex | infix operator
+#:
+procedure do_regexp_bar()
+    regexnoskip := &null
+    return REGEXBAR
+end
+
+#PD:
+#: do_regexp_qmark() - processes the ? postfix operator
+#:
+procedure do_regexp_qmark()
+    regexnoskip := &null
+    return REGEXQMARK
+end
+
+#PD:
+#: do_regexp_caret() - processes the ^ operator
+#:
+procedure do_regexp_caret()
+    regexnoskip := &null
+    return REGEXCARET
+end
+
+#PD:
+#: do_regexp_dot() - processes the . operator
+#:
+procedure do_regexp_dot()
+    regexnoskip := &null
+    return REGEXDOT
+end
+
+#PD:
+#: do_regexp_hyphen() - processes the - infix operator
+#:
+procedure do_regexp_hyphen()
+    regexnoskip := &null
+    return REGEXHYPHEN
+end
+
+#PD:
+#: do_regexp_lbrack() -  processes the [ prefix operator
+#:
+procedure do_regexp_lbrack()
+    regexnoskip := &null
+    return REGEXLBRACK
+end
+
+#PD:
+#: do_regexp_rbrack() - processes the ] postfix operator
+#:
+procedure do_regexp_rbrack()
+    regexnoskip := &null
+    return REGEXRBRACK
+end
+
+#PD:
+#: do_regexp_lparen() - processes the ( prefix operator
+#:
+procedure do_regexp_lparen()
+    regexnoskip := &null
+    return REGEXLPAREN
+end
+
+#PD:
+#: do_regexp_rparen() - processes the ) postfix operator
+#:
+procedure do_regexp_rparen()
+    regexnoskip := &null
+    return REGEXRPAREN
+end
+
+#PD:
+#: do_regexp_lbrace() - processes the { prefix operator
+#:
+procedure do_regexp_lbrace()
+    regexnoskip := &null
+    return REGEXLBRACE
+end
+
+#PD:
+#: do_regexp_rbrace() - processes the } postfix operator
+#:
+procedure do_regexp_rbrace()
+    regexnoskip := &null
+    return REGEXRBRACE
+end
+
+###############################################################################
+#
+#   End of new lexer code
+#
+###############################################################################
+
+#PD:
+#: do_letters() - this procedure will collect as many characters as possible that
+#: are part of the valid set of id characters. The global table reswords holds
+#: all reserved words and returns the relevant list associated with each of those
+#: reserved words. The table has been created to return a standard value for any
+#: entry that is not found in this table. This is the applicable value for all
+#: other identifiers
+#:
+procedure do_letters()
+    local   x                           #LV: temporary to hold list returned
+                                        #:   from reswords table lookup
+
+    #
+    # yytext already contains the first character of the identifier, we need to
+    # append to yytext all the following valid identifier characters.
+    #
+    yytext ||:= tab(many(idchars))
+    #
+    # using the the fact that the global variable has had the procedure value
+    # originally assigned by the runtime overwritten by the results of the original
+    # call. It now holds a table that automatically returns the required information
+    # needed for parsing identifiers and reserved words.
+    #
+    x := reswords[yytext]
+    #
+    # each of the reserved words has a specific set of token flags that are
+    # specified in the first list element of the result and for all other
+    # identifiers, the generic token flags applicable are found in the first list
+    # element of the not found entry.
+    #
+    tokflags +:= x[1]
+    #
+    # the second list element specifies the type of identifier found, for each
+    # reserved word, a specific to that reserved word value is returned, for all
+    # other identifiers, it is the value IDENT
+    #
+    return x[2]
+end
+
+#PD:
+#: radixcset(radix) - this procedure returns the required radix cset for the valid
+#: characters applicable for any radix from 2 to 36, the radix is specified as a
+#: string starting with digits and terminated by either r or R
+#: example "24r" or "15R
+#:
+#: this ensures that errors in the radix specification are found at the earliest
+#: and is not left to the icont or iconc translation process. This allows for a
+#: possible future where the unicon compiler generates the icode files instead
+#: of icont.
+#:
+procedure radixcset(radix)
+    static  lcase,                      #SV: the lower case cset converted to a string
+            ucase,                      #SV: the upper case cset converted to a string
+            digits                      #SV: the digits cset converted to a string
+    local   i,                          #LV: used as index into strings for the valid
+                                        #:   charaters applicable to the specified radix
+            cset1                       #LV: the resultant cset of valid radix characters
+
+    initial {
+        lcase   := "" || &lcase
+        ucase   := "" || &ucase
+        digits  := "" || &digits
+    }
+
+    if i := (10 >= integer(radix[1:-1])) + 1 then {
+        cset1 := digits[1:i]
+    } else {
+        cset1 := &digits
+        #
+        # calculate the number of letters (ucase/lcase) required
+        i := (10 < integer(radix[1:-1])) - 9
+        cset1 ++:= cset(lcase[1:i]) ++ cset(ucase[1:i])
+    }
+    return cset1
+end
+
+
+#PD:
+#: do_digits() - this procedure handles all the various formats that numbers are
+#: able to take and includes integers, reals, radix and decimal multiplier formats.
+#; If additional number formats become an option, this will be the place in which
+#: they will be decoded. Such formats could include rational and complex number
+#: formats.
+#:
+procedure do_digits()
+    local   radix,                      #LV: the radix for radix defined integers
+            c,                          #LV: checks for any following alpha character
+                                        #:   after a KMGTP
+            expstr,                     #LV: temporary used to determine if real
+                                        #:   exponent is greater than 308
+            dsz,                        #LV: this is a temporary for the purposes
+                                        #:   of working with die rolls
+            numdie                      #LV: another temproary for the purposes
+                                        #:   of working with die rolls
+
+    yytext ||:= tab(many(&digits))
+    tokflags +:= Beginner+Ender
+    if yytext ||:= ="." then {
+        yytext ||:= tab(many(&digits))
+        if yytext ||:= tab(any('eE')) then {
+            yytext ||:= tab(any('+-'))  # optional + or -
+            if not (expstr := tab(many(&digits))) then {
+                expstr := ""
+                uni_error("malformed real number")
+            } else if expstr > 308 then {
+                uni_error("real number out of range")
+            }
+            yytext ||:= expstr
+        }
+        return REALLIT
+    } else if yytext ||:= tab(any('eE')) then {
+        yytext ||:= ="-"                # optional; should we also allow + ?
+        if not (expstr := tab(many(&digits))) then {
+            uni_error("malformed real number")
+        } else if expstr > 308 then {
+            uni_error("real number out of range")
+        }
+        yytext ||:= expstr
+        return REALLIT
+    } else {
+        #
+        # if the sequence of digits is followed by either r or R then we
+        # are dealing with a radix formated value. Convert to the equivalent
+        # integer value. To ensure that only those characters that are
+        # applicable for any specific radix, we call a procedure that calculates
+        # the required cset. It is intended that this will allow the unicon
+        # compiler to be able to be extended to handle the linking and creation
+        # of a general usage icode file. It is intended that the interpreter
+        # runtime system become uniform across all platforms and that the
+        # unicon created icode files be platform independent. To that end,
+        # the unicon compiler needs to handle all of the tasks taht are now
+        # rtelegated to the icont compiler.
+        #
+        # In terms of the code generation for iconc, this will not make
+        # much difference to that system.
+        #
+        if tab(any('rR')) then {
+            radix := yytext || "r"
+            yytext := string(integer(radix || tab(many(radixcset(radix)))))
+        #
+        # if the sequence is followed by one of 'kKmMgGtTpP' then we have a
+        # specified multiplier to process and increse the number by
+        #
+        } else if c := tab(any('kK')) then {
+            yytext := string(yytext * 1024)
+        } else if c := tab(any('mM')) then {
+            yytext := string(yytext * 1024^2)
+        } else if c := tab(any('gG')) then {
+            yytext := string(yytext * 1024^3)
+        } else if c := tab(any('tT')) then {
+            yytext := string(yytext * 1024^4)
+        } else if c := tab(any('pP')) then {
+            yytext := string(yytext * 1024^5)
+        #
+        # The following change is related to handling die rolls, yytext will
+        # contain at this point a string representation of a decimal number. For
+        # this case, this number will represent the number of die rolls to be
+        # performed, 'dD' indicates that this is die rolls and the number following
+        # represents the number of sides that the dice has. The nyumber will be
+        # to an expression that will sum the results from the specified number
+        # of die roll which will call the random operator ? on the number of sides
+        # that have been specified for the dice. Examples are as follows:
+        #
+        # 3D6       represents 3 die rolls of a 6 sided dice and the sum of
+        #           those 3 random results
+        #           the expression returned will be (?6+?6+?6)
+        #
+        # 15D20     represents 15 die rolls of a 20 sided dice and the sum of
+        #           those 15 random results
+        #           the expression returned will be (?20+?20+?20+?20+?20+?20+?20+?20+?20+?20+?20+?20+?20+?20+?20)
+        #
+        # This has the potential to be used in writing games that need this facility
+        #
+        # There is an assumption made that only an integer value represented by
+        # the digits 0-9 will be in the prefix and postfix positions
+        #
+        } else if c := tab(any('dD')) & dsz := tab(many(&digits)) then {
+            #
+            # the number of die rolls to be performed
+            #
+            numdie := integer(yytext)
+            #
+            # we will now replace the contents of yytext with the expression
+            # that represents the die rolls, we need an opening parenthesis to
+            # ensure that the expression is protected from any other surrounding
+            # expressions.
+            #
+            yytext := "("
+            #
+            # !numdie is equivalent to 1 to numdie
+            every !numdie do {
+                #
+                # on the first run through, we do not append a "+" to the expression
+                # on each of the following run throughs we need to append "+"
+                #
+                if yytext ~== "(" then {
+                        yytext ||:= "+"
+                }
+                #
+                # we append the expression to generate the random number call
+                # based on the limits specified by the dice side count
+                #
+                yytext ||:= "?" || dsz
+            }
+            #
+            # finish of the expression with its closing parenthesis
+            #
+            yytext ||:= ")"
+        }
+        if \c & any(&letters) then {
+            uni_error("missing space or malformed token")
+        }
+        return INTLIT
+    }
+end
+
+#PD:
+#: do_dollar() - this procedure handles the special cases of the ebcidic character
+#: sequence and the special pattern operator.
+#:
+procedure
+    #
+    # The special ebcidic character sequences matched to the ascii tokens are
+    #
+    # ebcidic   ascii
+    #   $(  ->  {
+    #   $)  ->  }
+    #   $<  ->  [
+    #   #>  ->  ]
+    #
+    # operator for patterns
+    #
+    #   $$
+    #
+    if yytext ||:= ="(" then {
+        tokflags +:= Beginner
+        return LBRACE
+    }
+    if yytext ||:= =")" then {
+        tokflags +:= Ender
+        return RBRACE
+    }
+    if yytext ||:= ="<" then {
+        tokflags +:= Beginner
+        return LBRACK
+    }
+    if yytext ||:= =">" then {
+        tokflags +:= Ender
+        return RBRACK
+    }
+$ifndef PatternIntegration
+    if yytext ||:= ="$" then {
+        return PIMDASSN
+    }
+$endif
+    #
+    # The final operator to be selected is $ and as it has already been
+    # seen in the input, we do not have to scan for any other characters.
+    #
+    return DOLLAR
+end
+
+#PD:
+#: do_comma() - recogniser procedure for all applicable symbols starting with
+#: a ",". There is currently only one such symbol in unicon/icon
+#:
+procedure do_comma()
+    return COMMA
+end
+
+#PD:
+#: do_lbrack() - recogniser procedure for all applicable symbols starting with
+#: a "[". There is currently only one such symbol in unicon/icon
+#:
+procedure do_lbrack()
+    tokflags +:= Beginner
+    return LBRACK
+end
+
+#PD:
+#: do_rbrack() - recogniser procedure for all applicable symbols starting with
+#: a "]". There is currently only one such symbol in unicon/icon
+#:
+procedure do_rbrack()
+    tokflags +:= Ender
+    return RBRACK
+end
+
+#PD:
+#: do_lbrace() - recogniser procedure for all applicable symbols starting with
+#: a "{". There is currently only one such symbol in unicon/icon
+#:
+procedure do_lbrace()
+    tokflags +:= Beginner
+    return LBRACE
+end
+
+#PD:
+#: do_rbrace() - recogniser procedure for all applicable symbols starting with
+#: a "}". There is currently only one such symbol in unicon/icon
+#:
+procedure do_rbrace()
+    tokflags +:= Ender
+    return RBRACE
+end
+
+#PD:
+#: do_semi() - recogniser procedure for all applicable symbols starting with
+#: a ";". There is currently only one such symbol in unicon/icon
+#:
+procedure do_semi()
+    return SEMICOL
+end
+
+#PD:
+#: do_lparen() - recogniser procedure for all applicable symbols starting with
+#: a "(". There is currently only one such symbol in unicon/icon
+#:
+procedure do_lparen()
+    tokflags +:= Beginner
+    return LPAREN
+end
+
+#PD:
+#: do_rparen() - recogniser procedure for all applicable symbols starting with
+#: a ")". There is currently only one such symbol in unicon/icon
+#:
+procedure do_rparen()
+    tokflags +:= Ender
+    return RPAREN
+end
+
+#PD:
+#: do_tilde() - recogniser procedure for all applicable symbols starting with
+#: a "~". The symbols recognised are:
+#:
+#:  ~===:=  -   augmented not equivalent        -   AUGNEQUIV
+#:  ~===    -   not equivalent                  -   NEQUIV
+#:  ~==:=   -   augmented string not equal      -   AUGSNE
+#:  ~==     -   string not equal                -   SNE
+#:  ~=:=    -   augmented numeric not equal     -   AUGNMNE
+#:  ~=      -   numeric not equal               -   NMNE
+#:  ~       -   complement cset                 -   TILDE
+#:
+procedure do_tilde()
+    #
+    # as the first character has already been seen, we match on the following
+    # characters only.
+    #
+    # so for "~===:=", we need to match "===:=" and this occurs for each of
+    # the symbols that have a size greater than 1. The matching process
+    # will start with the longest sequence and then by any shorter matching
+    # sequences. So, we attempt to match "~===:=" before we match "~===", etc.
+    #
+    # matching for "~===:="
+    #
+    if yytext ||:= ="===:=" then {
+        return AUGNEQUIV
+    }
+    #
+    # matching for "~==="
+    #
+    if yytext ||:= ="===" then {
+        tokflags +:= Beginner
+        return NEQUIV
+    }
+    #
+    # matching for "~==:="
+    #
+    if yytext ||:= ="==:=" then {
+        return AUGSNE
+    }
+    #
+    # matching for "~=="
+    #
+    if yytext ||:= ="==" then {
+        tokflags +:= Beginner
+        return SNE
+    }
+    #
+    # matching for "~=:="
+    #
+    if yytext ||:= ="=:=" then {
+        return AUGNMNE
+    }
+    #
+    # matching for "~="
+    #
+    if yytext ||:= ="=" then {
+        tokflags +:= Beginner
+        return NMNE
+    }
+    #
+    # and finally, we match "~"
+    #
+    tokflags +:= Beginner
+    return TILDE
+end
+
+#PD:
+#: do_or() - recogniser procedure for all applicable symbols starting with
+#: a "|". The symbols recognised are:
+#:
+#:  |||:=   -   augmented list concatenation    -   AUGLCONCAT
+#:  |||     -   list concatenation              -   LCONCAT
+#:  ||:=    -   augmented string concatenation  -   AUGCONCAT
+#:  ||      -   string concatenation            -   CONCAT
+#:  |       -   or                              -   BAR
+#:
+#:
+#:
+procedure do_or()
+    #
+    # as the first character has already been seen, we match on the following
+    # characters only.
+    #
+    # so for "|||:=", we need to match "||:=" and this occurs for each of
+    # the symbols that have a size greater than 1. The matching process
+    # will start with the longest sequence and then by any shorter matching
+    # sequences. So, we attempt to match "|||:=" before we match "|||", etc.
+    #
+    # matching for "|||:="
+    #
+    if yytext ||:= ="||:=" then {
+        return AUGLCONCAT
+    }
+    #
+    # matching for "|||"
+    #
+    if yytext ||:= ="||" then {
+        tokflags +:= Beginner
+        return LCONCAT
+    }
+    #
+    # matching for "||:="
+    #
+    if yytext ||:= ="|:=" then {
+        return AUGCONCAT
+    }
+    #
+    # matching for "||"
+    #
+    if yytext ||:= ="|" then {
+        tokflags +:= Beginner
+        return CONCAT
+    }
+    #
+    # and finally, we match "|"
+    #
+    tokflags +:= Beginner
+    return BAR
+end
+
+#PD:
+#: do_caret() - recogniser procedure for all applicable symbols starting with
+#: a "^". The symbols recognised are:
+#:
+#:  ^:=     -   augmented power                 -   AUGCARET
+#:  ^       -   power                           -   CARET
+#:
+procedure do_caret()
+    #
+    # as the first character has already been seen, we match on the following
+    # characters only.
+    #
+    # so for "^:=", we need to match ":=" and this occurs for each of
+    # the symbols that have a size greater than 1. The matching process
+    # will start with the longest sequence and then by any shorter matching
+    # sequences. So, we attempt to match "^:=" before we match "^", etc.
+    #
+    #
+    # matching for "^:="
+    #
+    if yytext ||:= =":=" then {
+        return AUGCARET
+    }
+    #
+    # and finally, we match "^"
+    #
+    tokflags +:= Beginner
+    return CARET
+end
+
+#PD:
+#: do_backslash() - recogniser procedure for all applicable symbols starting with
+#: a "\". There is currently only one such symbol in unicon/icon
+#:
+procedure do_backslash()
+    tokflags +:= Beginner
+    return BACKSLASH
+end
+
+#PD:
+#: do_at() - recogniser procedure for all applicable symbols starting with
+#: a "@". The symbols recognised are:
+#:
+#:  @:=     -   augmented activate coexpression -   AUGAT
+#:  @>>     -   blocking send message           -   SNDBK
+#:  @>      -   send message                    -   SND
+#:  @       -   activate coexpression           -   AT
+#:
+procedure do_at()
+    #
+    # as the first character has already been seen, we match on the following
+    # characters only.
+    #
+    # so for "@:=", we need to match ":=" and this occurs for each of
+    # the symbols that have a size greater than 1. The matching process
+    # will start with the longest sequence and then by any shorter matching
+    # sequences. So, we attempt to match "@:=" before we match "^", etc.
+    #
+    #
+    # matching for "^:="
+    #
+    if yytext ||:= =":=" then {
+        return AUGAT
+    }
+    #
+    # matching for "@>>"
+    #
+    if yytext ||:= =">>" then {
+        tokflags +:= Beginner + Ender
+        return SNDBK
+    }
+    #
+    # matching for "@>"
+    #
+    #
+    if yytext ||:= =">" then {
+        tokflags +:= Beginner + Ender
+        return SND
+    }
+    #
+    # and finally, we match "@"
+    #
+    #
+    tokflags +:= Beginner
+    return AT
+end
+
+#PD:
+#: do_qmark() - recogniser procedure for all applicable symbols starting with
+#: a "?". The symbols recognised are:
+#:
+#:  ?:=     -   augmented string scanning       -   AUGQMARK
+#:  ??      -   pattern match                   -   PMATCH
+#:  ?       -   String scanning/Random          -   QMARK
+#:
+procedure do_qmark()
+    #
+    # as the first character has already been seen, we match on the following
+    # characters only.
+    #
+    # so for "?:=", we need to match ":=" and this occurs for each of
+    # the symbols that have a size greater than 1. The matching process
+    # will start with the longest sequence and then by any shorter matching
+    # sequences. So, we attempt to match "?:=" before we match "?", etc.
+    #
+    #
+    # matching for "?:="
+    #
+    if yytext ||:= =":=" then {
+        return AUGQMARK
+    }
+    #
+    # matching for "??"
+    #
+    if yytext ||:= = "?" then {
+        return PMATCH
+    }
+    #
+    # and finally, we match "?"
+    #
+    tokflags +:= Beginner
+    return QMARK
+end
+
+#PD:
+#: do_equal() - recogniser procedure for all applicable symbols starting with
+#: a "=". The symbols recognised are:
+#:
+#:  ===:=   -   augmented equivalent            -   AUGEQUIV
+#:  ===     -   not equivalent                  -   EQUIV
+#:  ==:=    -   augmented string not equal      -   AUGSEQ
+#:  ==      -   string not equal                -   SEQ
+#:  =:=     -   augmented numeric not equal     -   AUGNMEQ
+#:  =>      -   pattern immediate assign        -   PIMDASSN
+#:  =       -   numeric not equal               -   NMEQ
+#:
+#:
+procedure do_equal()
+    #
+    # as the first character has already been seen, we match on the following
+    # characters only.
+    #
+    # so for "===:=", we need to match "==:=" and this occurs for each of
+    # the symbols that have a size greater than 1. The matching process
+    # will start with the longest sequence and then by any shorter matching
+    # sequences. So, we attempt to match "===:=" before we match "===", etc.
+    #
+    # matching for "===:="
+    #
+    if yytext ||:= ="==:=" then {
+        return AUGEQUIV
+    }
+    #
+    # matching for "==="
+    #
+    if yytext ||:= ="==" then {
+        tokflags +:= Beginner
+        return EQUIV
+    }
+    #
+    # matching for "==:="
+    #
+    if yytext ||:= ="=:=" then {
+        return AUGSEQ
+    }
+    #
+    # matching for "=="
+    #
+    if yytext ||:= ="=" then {
+        tokflags +:= Beginner
+        return SEQ
+    }
+    #
+    # matching for "=:="
+    #
+    if yytext ||:= =":=" then {
+        return AUGNMEQ
+    }
+$ifndef NoPatternIntegration
+    #
+    # matching for "=>"
+    #
+    if yytext ||:= =">" then {
+        return PIMDASSN
+    }
+$endif
+    #
+    # and finally, we match "="
+    #
+    tokflags +:= Beginner
+    return NMEQ
+end
+
+global  next_gt_is_ender                #GV:
+
+#PD:
+#: do_greater() - recogniser procedure for all applicable symbols starting with
+#: a ">". The symbols recognised are:
+#:
+#:  >>=:=   -   augmented string greater than or equal  -   AUGSGE
+#:  >>=     -   string greater than or equal            -   SGE
+#:  >>:=    -   augmented string greater than           -   AUGSGT
+#:  >>      -   string greater than                     -   SGT
+#:  >=:=    -   augmented numeric greater than or equal -   AUGNMGE
+#:  >=      -   numeric greater than or equal           -   NMGE
+#:  >:=     -   augmented numeric greater than          -   AUGNMGT
+#:  >       -   numeric greater than                    -   NMGT
+#:
+procedure do_greater()
+    #
+    # as the first character has already been seen, we match on the following
+    # characters only.
+    #
+    # so for ">>=:=", we need to match ">=:=" and this occurs for each of
+    # the symbols that have a size greater than 1. The matching process
+    # will start with the longest sequence and then by any shorter matching
+    # sequences. So, we attempt to match ">>=:=" before we match ">>=", etc.
+    #
+    # matching for ">>=:="
+    #
+    if yytext ||:= =">=:=" then {
+        return AUGSGE
+    }
+    #
+    # matching for ">>="
+    #
+    if yytext ||:= =">=" then {
+        return SGE
+    }
+    #
+    # matching for ">>:="
+    #
+    if yytext ||:= =">:=" then {
+        return AUGSGT
+    }
+    #
+    # matching for ">>"
+    #
+    if yytext ||:= =">" then {
+        return SGT
+    }
+    #
+    # matching for ">=:="
+    #
+    if yytext ||:= =">=:=" then {
+        return AUGNMGE
+    }
+    #
+    # matching for ">="
+    #
+    if yytext ||:= ="=" then {
+        return NMGE
+    }
+    #
+    # matching for ">:="
+    #
+    if yytext ||:= =":=" then {
+        return AUGNMGT
+    }
+    #
+    # if we are in the alternative lexical analyser, which is represented
+    # by the global variable "next_gt_is_ender" holding a non-null value,
+    # then when we come across a ">", we need to switch back to the normal
+    # lexer.
+    #
+    if \next_gt_is_ender then {
+        tokflags +:= Ender
+        next_gt_is_ender := &null
+    }
+    #
+    # and finally, we match ">"
+    #
+    return NMGT
+end
+
+#PD:
+#: do_less() - recogniser procedure for all applicable symbols starting with
+#: a "<". The symbols recognised are:
+#:
+#:  <<=:=   -   augmented string less than or equal     -   AUGSLE
+#:  <<=     -   string less than or equal               -   SLE
+#:  <<:=    -   augmented string less than              -   AUGSLT
+#:  <<      -   string less than                        -   SLT
+#:  <=:=    -   augmented numeric less than or equal    -   AUGNMLE
+#:  <=      -   numeric greater than or equal           -   NMLE
+#:  <:=     -   augmented numeric less than             -   AUGNMLT
+#:  <->     -   reversable swap                         -   REVSWAP
+#:  <-      -   reversable assign                       -   REVASSIGN
+#:  <<@     -   blocking receive message                -   RCVBK
+#:  <@      -   receive message                         -   RCV
+#:  <       -   numeric less than                       -   NMLT
+#:
+#:
+procedure do_less()
+    #
+    # as the first character has already been seen, we match on the following
+    # characters only.
+    #
+    # so for "<<=:=", we need to match "<=:=" and this occurs for each of
+    # the symbols that have a size greater than 1. The matching process
+    # will start with the longest sequence and then by any shorter matching
+    # sequences. So, we attempt to match "<<=:=" before we match "<<=", etc.
+    #
+    # matching for "<<=:="
+    #
+    if yytext ||:= ="<=:=" then {
+        return AUGSLE
+    }
+    #
+    # matching for "<<="
+    #
+    if yytext ||:= ="<=" then {
+        return SLE
+    }
+    #
+    # matching for "<<:="
+    #
+    if yytext ||:= ="<=:=" then {
+        return AUGSLT
+    }
+    #
+    # matching for "<<"
+    #
+    if yytext ||:= ="<" then {
+        return SLT
+    }
+    #
+    # matching for "<=:="
+    #
+    if yytext ||:= ="=:=" then {
+        return AUGNMLE
+    }
+    #
+    # matching for "<="
+    #
+    if yytext ||:= ="=" then {
+        return NMLE
+    }
+    #
+    # matching for "<:="
+    #
+    if yytext ||:= ="=:=" then {
+        return AUGNMLT
+    }
+    #
+    # matching for "<->"
+    #
+    if yytext ||:= ="->" then {
+        return REVSWAP
+    }
+    #
+    # matching for "<-"
+    #
+    if yytext ||:= ="-" then {
+        return REVASSIGN
+    }
+    #
+    # matching for "<<@"
+    #
+    if yytext ||:= ="<@" then {
+        tokflags +:= Beginner + Ender
+        return RCVBK
+    }
+    #
+    # matching for "<@"
+    #
+    if yytext ||:= ="@" then {
+        tokflags +:= Beginner + Ender
+        return RCV
+    }
+    #
+    # and finally, we match "<"
+    #
+    #
+    # This is added to ensure that regexes can be expressions by themselves
+    # and be returned from block expressions
+    #
+    tokflags +:= Beginner
+    return NMLT
+end
+
+#PD:
+#: do_colon() - recogniser procedure for all applicable symbols starting with
+#: a ":". The symbols recognised are:
+#:
+#:  :=:     -   swap                    -   SWAP
+#:  :=      -   assignment              -   ASSIGN
+#:  ::      -   coloncolon              -   COLONCOLON
+#:  :       -   colon                   -   COLON
+#:
+#:
+procedure do_colon()
+    #
+    # as the first character has already been seen, we match on the following
+    # characters only.
+    #
+    # so for ":=:", we need to match "=:" and this occurs for each of
+    # the symbols that have a size greater than 1. The matching process
+    # will start with the longest sequence and then by any shorter matching
+    # sequences. So, we attempt to match ":=:" before we match ":=", etc.
+    #
+    # matching for ":=:"
+    #
+    if yytext ||:= ="=:" then {
+        return SWAP
+    }
+    #
+    # matching for ":="
+    #
+    if yytext ||:= ="=" then {
+        return ASSIGN
+    }
+    #
+    # matching for "::"
+    #
+    if yytext ||:= =":" then {
+        tokflags +:= Beginner
+        return COLONCOLON
+    }
+    #
+    # and finally, we match ":"
+    #
+    return COLON
+end
+
+#PD:
+#: do_slash() - recogniser procedure for all applicable symbols starting with
+#: a ":". The symbols recognised are:
+#:
+#:  /:=     -   augmented divide        -   AUGSLASH
+#:  /       -   null/divide             -   COLON
+#:
+#:
+procedure do_slash()
+    #
+    # as the first character has already been seen, we match on the following
+    # characters only.
+    #
+    # so for "/:=", we need to match ":=" and this occurs for each of
+    # the symbols that have a size greater than 1. The matching process
+    # will start with the longest sequence and then by any shorter matching
+    # sequences. So, we attempt to match "/:=" before we match "/", etc.
+    #
+    # matching for ":=:"
+    #
+    if yytext ||:= =":=" then {
+        return AUGSLASH
+    }
+    #
+    # and finally, we match "/"
+    #
+    tokflags +:= Beginner
+    return SLASH
+end
+
+#PD:
+#: do_dot() - recogniser procedure for all applicable symbols starting with
+#: a ".". The symbols recognised are:
+#:
+#:
+procedure do_dot()
+    if yytext ||:= tab(many(&digits)) then {
+        tokflags +:= Beginner+Ender
+        return REALLIT
+    } else if yytext ||:= ="|" then {
+        return POR
+    } else if yytext ||:= =">" then {
+        # .> is normally a cursor assignment, but not inside a regex
+        if next_gt_is_ender === 1 then {
+            move(-1) # back up, don't eat the >
+            tokflags +:= Beginner
+            return DOT
+        } else {
+            return PSETCUR
+        }
+    # next one .$ is candidate for deletion, old S.G. syntax
+    } else if yytext ||:= ="$" then {
+        return PSETCUR
+    } else {
+        tokflags +:= Beginner
+        return DOT
+    }
+end
+
+#PD:
+#: do_minus() - recogniser procedure for all applicable symbols starting with
+#: a "-". The symbols recognised are:
+#:
+#:  --:=    -   augmented set difference    -   AUGDIFF
+#:  --      -   set difference              -   DIFF
+#:  -:=     -   augmented minus             -   AUGMINUS
+#:  -:      -   mcolon                      -   MCOLON
+#:  ->      -   patten match assignment     -   PASSNONMATCH
+#:  -       -   minus/negate                -   MINUS
+#:
+#:
+procedure do_minus()
+    #
+    # as the first character has already been seen, we match on the following
+    # characters only.
+    #
+    # so for "--:=", we need to match "-:=" and this occurs for each of
+    # the symbols that have a size greater than 1. The matching process
+    # will start with the longest sequence and then by any shorter matching
+    # sequences. So, we attempt to match "--:=" before we match "--", etc.
+    #
+    # matching for "--:="
+    #
+    if yytext ||:= ="-:=" then {
+        return AUGDIFF
+    }
+    #
+    # matching for "--"
+    #
+    if yytext ||:= ="-" then {
+        tokflags +:= Beginner       # could be two unary prefix - operators
+        return DIFF
+    }
+    #
+    # matching for "-:="
+    #
+    if yytext ||:= =":=" then {
+        return AUGMINUS
+    }
+    #
+    # matching for "-:"
+    #
+    if yytext ||:= =":" then {
+        return MCOLON
+    }
+    #
+    # matching for "->"
+    #
+    if yytext ||:= =">" then {
+        return PASSNONMATCH
+    }
+    #
+    # and finally, we match "-"
+    #
+    tokflags +:= Beginner
+    return MINUS
+end
+
+#PD:
+#: do_plus() - recogniser procedure for all applicable symbols starting with
+#: a "+". The symbols recognised are:
+#:
+#:  ++:=    -   augmented set union         -   AUGUNION
+#:  ++      -   set union                   -   UNION
+#:  +:=     -   augmented plus              -   AUGPLUS
+#:  +:      -   pcolon                      -   PCOLON
+#:  +       -   plus                        -   PLUS
+#:
+#:
+procedure do_plus()
+    #
+    # as the first character has already been seen, we match on the following
+    # characters only.
+    #
+    # so for "++:=", we need to match "+:=" and this occurs for each of
+    # the symbols that have a size greater than 1. The matching process
+    # will start with the longest sequence and then by any shorter matching
+    # sequences. So, we attempt to match "++:=" before we match "++", etc.
+    #
+    # matching for "++:="
+    #
+    if yytext ||:= ="+:=" then {
+        return AUGUNION
+    }
+    #
+    # matching for "++"
+    #
+    if yytext ||:= ="+" then {
+        tokflags +:= Beginner       # could be two unary prefix + operators
+        return UNION
+    }
+    #
+    # matching for "+:="
+    #
+    if yytext ||:= =":=" then {
+        return AUGPLUS
+    }
+    #
+    # matching for "+:"
+    #
+    if yytext ||:= =":=" then {
+        return PCOLON
+    }
+
+    # if we just saw a : and now a +, issue a warning.
+    if (\yytoken).s == ":" & yytoken.column + 1 = yycolno then {
+        yytext := ":+"
+        warning("token may be malformed, did you mean +: ?")
+        yytext := "+"
+    }
+    #
+    # and finally, we match "+"
+    #
+    tokflags +:= Beginner
+    return PLUS
+end
+
+#PD:
+#: do_star() - recogniser procedure for all applicable symbols starting with
+#: a "*". The symbols recognised are:
+#:
+#:  **:=    -   augmented set intersect     -   AUGINTER
+#:  **      -   set intersect               -   INTER
+#:  *:=     -   augmented multiply          -   AUGSTAR
+#:  *       -   multiply/size               -   STAR
+#:
+#:
+procedure do_star()
+    #
+    # as the first character has already been seen, we match on the following
+    # characters only.
+    #
+    # so for "**:=", we need to match "*:=" and this occurs for each of
+    # the symbols that have a size greater than 1. The matching process
+    # will start with the longest sequence and then by any shorter matching
+    # sequences. So, we attempt to match "**:=" before we match "**", etc.
+    #
+    # matching for "**:="
+    #
+    if yytext ||:= ="+:=" then {
+        return AUGINTER
+    }
+    #
+    # matching for "**"
+    #
+    if yytext ||:= ="*" then {
+        tokflags +:= Beginner       # could be two unary prefix * operators
+        return INTER
+    }
+    #
+    # matching for "*:="
+    #
+    if yytext ||:= =":=" then {
+        return AUGSTAR
+    }
+    #
+    # and finally, we match "*"
+    #
+    tokflags +:= Beginner
+    return STAR
+end
+
+#PD:
+#: do_and() - recogniser procedure for all applicable symbols starting with
+#: a "&". The symbols recognised are:
+#:
+#:  &:=     -   augmented and               -   AUGAND
+#:  &&      -   pattern and                 -   PAND
+#:  &       -   and                         -   AND
+#:
+#:
+procedure do_and()
+    #
+    # as the first character has already been seen, we match on the following
+    # characters only.
+    #
+    # so for "&:=", we need to match ":=" and this occurs for each of
+    # the symbols that have a size greater than 1. The matching process
+    # will start with the longest sequence and then by any shorter matching
+    # sequences. So, we attempt to match "&:=" before we match "&", etc.
+    #
+    # matching for "&:="
+    #
+    if yytext ||:= =":=" then {
+        return AUGAND
+    }
+    #
+    # matching for "&&"
+    #
+    if yytext ||:= ="&" then {
+$ifndef _PATTERNS
+        warning("pattern operator && is non-standard, did you mean & ?");
+$endif
+        return PAND
+    }
+    #
+    # and finally, we match "*"
+    #
+    tokflags +:= Beginner
+    return AND
+end
+
+#PD:
+#: do_mod() - recogniser procedure for all applicable symbols starting with
+#: a "%". The symbols recognised are:
+#:
+#:  %:=     -   augmented mod               -   AUGMOD
+#:  %       -   and                         -   MOD
+#:
+#:
+procedure do_mod()
+    #
+    # as the first character has already been seen, we match on the following
+    # characters only.
+    #
+    # so for "%:=", we need to match ":=" and this occurs for each of
+    # the symbols that have a size greater than 1. The matching process
+    # will start with the longest sequence and then by any shorter matching
+    # sequences. So, we attempt to match "%:=" before we match "%", etc.
+    #
+    # matching for "%:="
+    #
+    if yytext ||:= =":=" then {
+        return AUGMOD
+    }
+    #
+    # and finally, we match "%"
+    #
+    return MOD
+end
+
+#PD:
+#: do_bang() - recogniser procedure for all applicable symbols starting with
+#: a "!". There is currently only one such symbol in unicon/icon
+#:
+procedure do_bang()
+    tokflags +:= Beginner
+    return BANG
+end
+
+
+#PD:
+#: do_literal() -
+#:
+procedure do_literal()
+    local   eat,                        #LV: temporary to hold the whitepsace
+                                        #:   found at the beginning of a continuation
+                                        #:   for a string
+            s                           #LV: temporary to hold each character in string
+    #
+    # now that the regex lexer has incorporated the hex, octal and control
+    # forms, we now use this to process the same translations
+    #
+    until yytext ||:= =(yytext[1]) do {
+        #
+        # first test for any backslash escaped sequences and handle them
+        #
+        if ="\\" then {
+            #
+            # can use the procedure convert_backslash() to handle backslash escaped
+            # sequences. This will handle all the \c, \xhh, \ooo and \^c sequences.
+            #
+            yytext ||:= convert_backslash()
+        #
+        # next look if _\n has been found and process according to the standard
+        # continuation rules for strings and csets. The allowable characters
+        # between the continuation character _ and the newline are spaces and tabs
+        #
+        # first we need to find the continuation character _
+        #
+        } else if ="_" then {
+            #
+            # collect all spaces and tabs, if none found then make it a zero
+            # length string. This will used to calculate the column number required
+            #
+            eat := (tab(many(' \t')) | "")
+            #
+            # if a newline is found then we have found a continuation character
+            #
+            if ="\n" then {
+                yylineno +:= 1
+                yycolno := 1
+                #
+                # discard newline. collect trailing whitespace or if none make the
+                # the value a zero length string. This will used to calculate the
+                # column number required
+                #
+                eat := (tab(many(' \t')) | "")
+            #
+            # else we treat the character _ as a normal character and append it
+            # and any spaces or tabs to the string
+            #
+            } else {
+                eat := "_" || eat
+                yytext ||:= eat
+            }
+            #
+            # we can now adjust the column position accordingly based on the
+            # whitespace collected previously
+            #
+            every s := !eat do {
+                yycolno +:= 1
+                if s == "\t" then {
+                    while (yycolno-1) % 8 ~= 0 do {
+                        yycolno +:= 1
+                    }
+                }
+            }
+        #
+        # if we find a \n without the continuation character then we have an
+        # unterminated string or cset on our hands
+        #
+        } else if ="\n" then {
+            uni_error("unterminated string constant")
+            break
+        #
+        # anything else can be appended to the string or cset value being created
+        #
+        } else {
+            yytext ||:= move(1)
+        }
+    }
+    tokflags +:= Beginner + Ender
+    if yytext[1] == "'" then {
+        return CSETLIT
+    } else {
+        return STRINGLIT
+    }
+end
+
+#PD:
+#: do_backquote() - PUNEVAL == Pattern unevaluated. Needs much stronger parsing/checking.
+#:
+procedure do_backquote()
+    static  unallowedchars              #LV: the cset containing all ASCII
+                                        #:   characters not found in unevaluated
+                                        #:   expressions in patterns
+
+    initial {
+        unallowedchars := &ascii -- ( &letters ++ '()`., "_' ++ &digits)
+    }
+    if yytext ||:= ="`" then {
+        until yytext ||:= ="``" do {
+            if not (yytext ||:= move(1)) then {
+                uni_error(yytext)
+                return PUNEVAL
+            }
+        }
+    } else {
+        until yytext ||:= ="`" do {
+            if not (yytext ||:= move(1)) then {
+                uni_error(yytext)
+                return PUNEVAL
+            }
+        }
+    }
+    yytext ? {
+        if tab(upto(unallowedchars)) then {
+            uni_error(": character " || move(1) || " not supported in ` ` expresssion")
+        }
+#       if *yytext = bal() then {}
+#       else uni_error(yytext)
+    }
+    tokflags +:= Ender
+    return PUNEVAL
+end
+
+#PD:
+#: yylex_reinit() -
+#:
+procedure yylex_reinit()
+    yytext := ""
+    yylineno := 0
+    yycolno := 1
+    lastchar := ""
+    if type(yyin) == "file" then {
+        buffer := reads(yyin, 1000000)
+    } else if type(yyin) == "list" then {
+        buffer := pop(yyin) | ""
+    } else {
+        buffer := yyin
+    }
+    tokflags := 0
+end
+
+#PD:
+#: yylex(ender) -
+#:
+procedure yylex(ender)
+    static  saved_tok,                  #SV:
+            saved_yytext                #SV:
+    local   rv                          #LV:
+
+    initial {
+        yylex2 := yylex2Normal
+        if /buffer then {
+            yylex_reinit()
+        }
+    }
+    if /buffer then {
+        if \debuglex then {
+            write("yylex() : 0")
+        }
+        return 0
+    }
+    if \saved_tok then {
+        rv := saved_tok
+        saved_tok := &null
+        yytext := saved_yytext
+        yylval := yytoken := token(rv, yytext, yylineno, yycolno, yyfilename)
+        if \debuglex then {
+            write("yylex() : ", tokenstr(rv), "\t", image(yytext))
+        }
+        return rv
+    }
+    if /ender := iand(tokflags, Ender) then {
+        tokflags := 0
+    }
+    if *buffer=0 then {
+        if type(yyin)=="list" then {
+            if buffer := pop(yyin) then {
+                yylineno +:= 1
+                yycolno := 1
+                if tokflags < Newline then {
+                    tokflags +:= Newline
+                }
+                return yylex(ender)
+            }
+        }
+        buffer := &null
+        if \debuglex then {
+            write("yylex() : EOFX")
+        }
+        return EOFX
+    }
+    buffer ? {
+        if rv := yylex2() then {
+            buffer := tab(0)
+        } else {
+            if type(yyin)=="list" then {
+                if buffer := pop(yyin) then {
+                    yylineno +:= 1
+                    yycolno := 1
+                    if tokflags < Newline then {
+                        tokflags +:= Newline
+                    }
+                    return yylex(ender)
+                }
+            }
+            buffer := &null
+            yytext := ""
+            if \debuglex then {
+                write("yylex() : EOFX")
+            }
+            return EOFX
+        }
+    }
+    if ender~=0 & iand(tokflags, Beginner) ~= 0 & iand(tokflags, Newline) ~= 0 then {
+        saved_tok := rv
+        saved_yytext := yytext
+        yytext := ";"
+        rv := SEMICOL
+    }
+    yylval := yytoken := token(rv, yytext, yylineno, yycolno, yyfilename)
+    if \debuglex then {
+        write("yylex() : ", tokenstr(rv), "\t", image(yytext))
+    }
+    return rv
+end
+
+#PD:
+#: token_isconst(t) - tell whether a token is a constant or not
+#:
+procedure token_isconst(t)
+    return case t.tok of {
+        INTLIT | REALLIT | STRINGLIT | CSETLIT : {
+            "const"
+        }
+        default : {
+            fail
+        }
+    }
+end
+
+#PD:
+#: main(argv) -
+#:
+#procedure main(argv)
+#  local i
+#  yyfilename := argv[1] | stop("usage: unilex filename")
+#  yyin := ""
+#  every yyin ||:= preprocessor(yyfilename, predefs()) do yyin ||:= "\n"
+#  yylex_reinit()
+
+#  while (i := yylex()) ~=== EOFX do
+#     write(image(i),": ",image(yytext))
+#end

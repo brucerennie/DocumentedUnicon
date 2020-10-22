@@ -1,0 +1,1120 @@
+#
+# verified to revision 5602 - use svn blame unicon.icn &>unicon.blame to get new revisions
+#
+#
+# unicon.icn - main module for the Unicon OOP preprocessor
+#
+# SYNOPSIS:
+#
+#   unicon prog[.icn] ... [-x args ]
+#   prog
+#
+# FILES:
+#
+#   ./prog.icn                     : Unicon source code
+#   ./uniclass.{dir,pag}           : class/inheritance database
+#
+# SEE ALSO:
+#
+#   "Programming with Unicon", draft manuscript, 460pp.
+#   serves as user's guide and reference manual for Unicon
+#
+$include "includes.icn"
+
+#PD:
+#: istop(args[]) - this procedure is used to print a message and then terminate
+#: the compiler activity
+#:
+#:@param args           this is a list of message strings that are to be printed.
+#:@aborts               this procedure will cause the program to abort using exit()
+#:
+procedure istop(args[])
+
+    if push(args, \flog) then {
+        write ! args
+        pop(args)
+        close( flog )                   # if close(flog) then @ &main
+        moveto(flogname, widollog)
+    }
+    if \loud then {
+        stop ! args
+    } else {
+        exit(1)
+    }
+end
+
+#PD:
+#: iwrite(args[]) - calls the procedure writer with the inbuilt function write
+#: as the display function to use. The procedure writer will handle any logging
+#: of messages that have been specified on the command line.
+#:
+#:@param args           list of values to be displayed, the relevant display function
+#:@                     will be pushed onto the fron of this list
+#:@returns              the last specified value of the supplied list
+#:
+procedure iwrite(args[])
+    return writer ! push(args, write)
+end
+
+#PD:
+#: iwrites(args[]) - calls the procedure writer with the inbuilt function writes
+#: as the display function to use. The procedure writer will handle any logging
+#: of messages that have been specified on the command line.
+#:
+#:@param args           list of values to be displayed, the relevant display function
+#:@                     will be pushed onto the fron of this list
+#:@returns              the last specified value of the supplied list
+#:
+procedure iwrites(args[])
+    return writer ! push(args, writes)
+end
+
+#PD:
+#: writer(func, args[]) - the common code in the two procedures iwrite()
+#: and iwrites() has been extracted and placed in the following code. the
+#: first parameter is used to specify the required function (either write or writes)
+#:
+#:@global loud
+#:@global silent
+#:@global flog
+#:
+#:@param func           the relevant display function to use to print the messages
+#:@                     supplied in the rest of the call
+#:@param args           the list of messages that are required to be displayed and/or
+#:@                     logged for later viewing
+#:@returns              the last applicable value to be printed.
+#:
+procedure writer(func, args[])
+    if \loud then {
+        if /silent | *parsingErrors > 0 then {
+            func ! args
+        }
+    }
+    if \flog then {
+        if args[1] === &errout then {
+            pop(args)
+        }
+        push(args, flog)
+        func ! args
+    }
+    return args[-1] | ""
+end
+
+#PD:
+#:
+#:
+procedure calc_posix_loc()
+    local   bpath,                      #LV: holds the path of the interpreter binary
+                                        #:   as specified in &features
+            f                           #LV: used to test if interpreter binary is
+                                        #:   is found at an alternative location
+    #
+    # if &features contains the location of the interpreter binaries use that
+    # or test if the interpreter binaries are located in some alterantive directory
+    # then use that path
+    #
+    if (bpath := (&features ? (="Binaries at " & tab(0)))) |
+            ((f := open((bpath := getpaths()) ||
+            ("iconx"|"iconx.exe"|"wiconx.exe")))) then {
+        close(\f)
+        #
+        # set the location of the posix source file
+        #
+        iconc_posixloc := (bpath || "../ipl/procs/posix.icn")
+    } else {
+        istop("cannot calculate location of posix.icn relative to iconx")
+    }
+end
+
+
+#PD:
+#:
+#:
+procedure get_abs_file_name(fname)
+    local   pair,                       #LV:
+            cwd,                        #LV:
+            rslt                        #LV:
+
+    pair := tail(fname)
+    #
+    # if the directory is not specified in the filename
+    # set the directory to the current by using "."
+    #
+    if pair[1] == "" then {
+        pair[1] := "."
+    }
+    #
+    # use the chdir function to determine the absolute directory pathname, this
+    # will remove any relative path specifiers that may be in the pathname. If
+    # the directory cannot be resolves report this and halt the compiler processing
+    #
+    cwd := chdir()
+    if not (rslt := chdir(pair[1])) then {
+        halt("chdir(", image(pair[1]|fname), ") failed: ", &errortext)
+    }
+    chdir(cwd)
+
+    #
+    # make sure that the PATHCHAR character ends the directory name and append
+    # the filename to the absolute directory name
+    #
+    if not (rslt[-1] == PATHCHAR) then {
+        rslt ||:= PATHCHAR
+    }
+    rslt ||:= pair[2]
+    return rslt
+end
+
+
+#PD:
+#: initialize global variables
+#:
+procedure initialize()
+    #
+    # by default we want the unicon compiler to display progress message as it
+    # processes the source and ucode files
+    #
+    loud     := 1
+    comp     := 0
+    #
+    # initialise the various error counts to zero and the list of error messages
+    # to an empty list
+    #
+    yynerrs  := 0
+    errors   := 0
+
+    returnErrorsFlag := 0
+    parsingErrors := []
+
+    #
+    #
+    merraddress := MERRADDRESS
+    #
+    # initialise the working csets
+    #
+    alpha    := &ucase ++ &lcase ++ '_' ++ &digits
+    nonalpha := &cset -- alpha
+    alphadot := alpha ++ '.'
+    white    := ' \t\f\r'
+    nonwhite := &cset -- white
+    #
+    # this sets up the initial values for processing class, package, links and imports
+    #
+    reinitialize()
+    #
+    # initialise the linker and icont options to the blank string, as relevant
+    # command line options are found, these will be added appropriately
+    #
+    ilinkopt := ""
+    icontopt := ""
+    linkline := ""
+    #
+    # general initialisation of the temporary variable counter.
+    #
+    tmpcount := 0
+    #
+    # there is one use of this variable, but as yet am unable to determine, what and why
+    # need to determineif the procedure call is ever done, if not, then it needs to be removed.
+    #
+    reserved := " fi neht esle yreve elihw od ot yb "
+    #
+    # for this run, create a unique log file name
+    #
+    flogname := tempname("uni",,,5)
+    if widollog := getenv("WIDOLLOG") then {
+        flog := open(flogname,"w")
+    }
+    #
+    # create the default preprocessor definitions for this run
+    #
+    uni_predefs := predefs()
+    #
+    # run all other initialisations required
+    #
+    sysinitialize()
+end
+
+#PD:
+#:
+#:
+procedure setsystempath(systemvariable, values)
+    local   currentoption,              #LV: the current option being added
+            tmp_s                       #LV: temporary string variable
+    tmp_s := ""
+    every currentoption := !values do {
+        tmp_s ||:= currentoption || " "
+    }
+    tmp_s ||:= " " || getenv(systemvariable)
+    setenv(systemvariable, tmp_s) | write(&errout, "setenv failed")
+
+end
+
+#PD:
+#:
+#:
+procedure unicon(argv)
+    local   tmpfnames,                  #LV:
+            tmpopt,                     #LV:
+            currentoption,              #LV:
+            optiontable,                #LV:
+            dash_v,                     #LV: removed
+            skip,                       #LV:
+            dash_s,                     #LV: removed
+            parseonly,                  #LV:
+            i,                          #LV:
+            thepath,                    #LV:
+            tmp_s,                      #LV:
+            ucodefile,                  #LV:
+            cmd,                        #LV:
+            wilog,                      #LV:
+            j,                          #LV: new
+            keeptmp,                    #LV: if set keep the temporary working files
+            flog2,                      #LV:
+            locallinks,                 #LV:
+            localimports,               #LV:
+            k,                          #LV:
+            files,                      #LV:
+            n,                          #LV:
+            local_name,                 #LV:
+            v,                          #LV:
+            mw_tmpname,                 #LV:
+            rv,                         #LV:
+            pe,                         #LV:
+            fset                        #LV: cset containing the specified options
+                                        #:   found when using -f[adelns]
+
+    #
+    # initially set to the empty cset
+    #
+    fset := ''
+    initialize()
+
+    if *argv = 0 then {
+        unicon_usage()
+    }
+    #
+    # have converted the argument processing to use the modified options procedure,
+    # so we now use an option table to hold the relevant command line options.
+    #
+    optiontable := options(argv, "--help!-?-B-c-C$-D:*-e:-E-features!_
+                                  -f$-G-h-I:*-L:*-K-log!-M-n$-nofs!-o:-O-quiet_
+                                  -p:*-r-s-t-u-v+-version!-y-yydbg!-Z",,"-x")
+
+    #
+    # the following is deprecated following the change to testing for &null values
+    # in the tree handling code in tree.icn
+    #
+    EmptyNode := leaf("Empty")      # was the variable N_Empty which contained a &null, changed to a specific string value
+
+    /yydebug := 0
+
+    #
+    # initailise the iconc specific variables, not used with icont/iconx
+    #
+    tmpfnames := []
+    iconc_links := table()
+    iconc_parsed := table()
+    iconc_imports := table()
+
+    #
+    # for use by the iconc process only - has no meaning for interpreter icont/iconx
+    #
+    ca_init()
+
+    #
+    # process each option found on the command line. In the original compiler this
+    # is a loop and processes each argument in turn. As we now use the procedure "option",
+    # we can now process each found option one after the other.
+    #
+    # option "version" found, print and exit program
+    #
+    if \optiontable["version"] then {
+        iwrite(&version)
+        return 0
+    }
+    #
+    # option "features" found, print all features and exit program
+    #
+    if \optiontable["features"] then {
+        every iwrite(&features)
+        return 0
+    }
+    #
+    # test to see if both options "C" and "c" are found, if so an error must be reported
+    # as these two options are incompatible, one is for the iconc compiler and
+    # the other one is for the interpreter icont/iconx
+    #
+    if \optiontable["C"] & \optiontable["c"] then {
+        istop("conflicting requests for -c and -C")
+    }
+    #
+    # option "help" found, print help and exit program
+    #
+    if \optiontable["-help" | "?" | "h"] then {
+        #
+        # unicon_help will perform an exit so none is required here. If that ever
+        # changes, it will be necessary to add the appropriate exit() or istop()
+        # call immediately following the unicon_help call
+        #
+        unicon_help()
+    }
+    #
+    # option "D" (preprocessor symbols) have been found, value is a list of symbols
+    #
+    if tmpopt := \optiontable["D"] then {
+        #
+        # process each of the symbols found and add to the preprocessor predefined
+        # list of symbols.
+        every currentoption := !tmpopt do {
+            \currentoption ? {
+                if sym := tab(find("=")) then {
+                    move(1)
+                    def := tab(0)
+                } else {
+                    sym := tab(0)
+                    def := "1"
+                }
+                uni_predefs[sym] := def
+            }
+        }
+    }
+    #
+    # option "C" found, generate code suitable for consumption by iconc.
+    #
+    if currentoption := \optiontable["C"] then {
+        iconc := parseonly := 1
+        tmpopt := "-U" || ( ("1" ~== currentoption) | "1") || " "
+        icontopt ||:= tmpopt
+        calc_posix_loc()
+    }
+    #
+    # option "c" found, don't create interpreter executable
+    #
+    if \optiontable["c"] then {
+        sysok := &null
+        comp := -1        # don't make exe
+    }
+    #
+    # option "log" found, create a log file for this run
+    #
+    if currentoption := \optiontable["log"] then {
+        if widollog := (1 ~= currentoption) then {
+            #
+            # flogname is given a value during the initialisation stage above
+            # and is a global variable
+            #
+            /flog := open(flogname, "w") |
+                write(&errout, "couldn't write log to ",image(flogname))
+        }
+    }
+    #
+    # option "quiet" found, clear the global loud, by default, unicon operates in
+    # loud mode
+    #
+    loud := (\optiontable["quiet"] & &null)
+    #
+    # option "o" found, set the required executable name, applies to both compiler
+    # and interpreter
+    #
+    exename := " -o " || quotes(\optiontable["o"]) || " "
+    #
+    # option "e" found, Really, -e should redirect *our* stderr output, and then
+    # tell the icont/iconc invocation to append its stderr output.
+    #
+    exename := " -e " || quotes(\optiontable["e"]) || " "
+    #
+    # option "O" found, optimize is set but not currently used
+    #
+    optimize := \optiontable["O"]
+    #
+    # option "y" found, parse only and do not create exe's
+    #
+    parseonly := \optiontable["y"]
+    #
+    # option "yydbg" found, force parse only and set up for parser debugging
+    #
+    parseonly := yydbg := \optiontable["yydbg"]
+    #
+    # option "B" found, add to link options the "-B" (bundle vm) option
+    #
+    ilinkopt ||:= ( \optiontable["B"] & "-B " )
+    #
+    # option "G" found, add to link options the "-G" (MS Windows graphics) option
+    #
+    ilinkopt ||:= ( \optiontable["G"] & "-G " )
+    #
+    # option "Z" found, add to link options the "-Z" (compress icode file) option
+    #
+    ilinkopt ||:= ( \optiontable["Z"] & "-Z " )
+    #
+    # option "v" found, add to the options the "-v" (diagnostic verbosity) option
+    #
+    if \optiontable["v"] then {
+        ilinkopt ||:= "-v" || \optiontable["v"] || " "
+        icontopt ||:= "-v" || \optiontable["v"] || " "
+        silent := (0 = \optiontable["v"] & 1)
+    }
+    #
+    # option "M" found, report the errors found to Unicon head developer
+    #
+    merrflag := \optiontable["M"]
+    #
+    # option "r" found,
+    #
+    returnErrorsFlag := \optiontable["r"]
+    #
+    # option "E" found, add to the options, preprocess only, no compilation
+    #
+    icontopt ||:= ( \optiontable["E"] & "-E " )
+    #
+    # option "f[adelns]" found, add to the options
+    #
+    if \optiontable["f"] then {
+        fset := cset(\optiontable["f"])
+        icontopt ||:= "-f " || fset || " "
+    }
+    #
+    # option "n[acest]" found, add to the options
+    #
+    if \optiontable["n"] then {
+        icontopt ||:= "-n " || cset(\optiontable["n"]) || " "
+    }
+    #
+    # option "p" arguments to be passed to iconc C compiler
+    #
+    if tmpopt := \optiontable["p"] then {
+        every currentoption := !tmpopt do {
+            icontopt ||:= "-p " || currentoption || " "
+        }
+    }
+    #
+    # option "s" found, add to the options, operate in silent mode
+    #
+    if \optiontable["s"] then {
+        icontopt ||:= ( \optiontable["s"] & "-s " )
+        ilinkopt ||:= ( \optiontable["s"] & "-s " )
+        silent := -1
+    }
+    #
+    # option "t" found, add to the options, turn on tracing
+    #
+    icontopt ||:= ( \optiontable["t"] & "-t " )
+    #
+    # option "u" found, add to the options, show all undeclared variables
+    #
+    icontopt ||:= ( \optiontable["u"] & "-u " )
+    #
+    # option "nofs" found, no string invocation for iconc
+    #
+    no_iconc_fs := \optiontable["nofs"]
+    #
+    # option "K" found, keep the tempoaray work files
+    #
+    keeptmp := \optiontable["K"]
+
+###############################################################################
+#
+# THE NOTES BELOW EXPLAIN THE "WHY" OF THE USE OF THE -I AND -L OPTIONS FROM
+# THE HISTORICAL PERSPECTIVE.
+#
+#
+#   There is a terrible irony to acknowledge here. Originally Icon had no
+#   include mechanism and IPATH meant Icon PATH, and was for link file
+#   searches. Ralph Griswold being the stalwart backward compatibility guru
+#   that he was, would not rename IPATH to LPATH (for "link path") when
+#   $include was added, and for whatever reason, chose to use LPATH for the
+#   $include searches. So Icon is committed to these names despite their
+#   backwardness, and Unicon is about as obsessed with backward compatibility
+#   as Icon, so we use the same environment variable definitions.  But
+#   whichever genius added the -I and -L command line options, probably me or
+#   at my direction, adhered to the "C-compiler command line option style",
+#   in which -I specifies include directories and -L specifies link
+#   directories, so this reversal is known and intentional. (The "me" refererd)
+#   in the above is "Clinton Jeffery".)
+#
+#   We can debate whether the *PATH environment variables' semantics should be
+#   swapped (breaking Icon compatibility), or whether the -I and -L semantics
+#   should be swapped (breaking C command-line style), or whether a higher
+#   level of documentation would alleviate matters for users.
+#
+###############################################################################
+
+#
+    setsystempath("LPATH", \optiontable["I"])
+    setsystempath("IPATH", \optiontable["L"])
+
+    #
+    # process rest of command line options. Since these will normally be source files
+    # to be parsed or files that have already been made into ucode files, most
+    # of the code here deals with processing each of those source files or ucodefile
+    # files.
+    #
+    every i := 1 to *argv do {
+        #
+        # option "x" found, set flag xec and skip
+        if argv[i] == "-x" then {
+            break (xec := i)
+        } else {
+            #
+            # options now found should be filenames of source files or ucode files
+            # if nothing found, then show message and stop
+            #
+            yyfilename := argv[i] | stop("usage: unicon file")
+            #
+            # unicon can process from stdin, this is represented on the command
+            # line by "-". For the correct processing of yyfilename, the stdin
+            # is represented by the filename "_stdin.icn"
+            #
+            if yyfilename == "-" then {
+                yyfilename := "_stdin.icn"
+            }
+            #
+            # no suffix found then add ".icn" to file name given
+            #
+            if not (map(yyfilename[find(".", yyfilename) + 1 : 0]) == ("icn" | "u" | "u1" | "u2")) then {
+                yyfilename ||:= ".icn"
+            }
+            #
+            # do not translate .u files
+            #
+            if map(yyfilename[find(".", yyfilename)+1 : 0]) == ("u" | "u1" | "u2") then {
+                linkline ||:= " " || quotes(yyfilename)
+                if \iconc then {
+                    insert(iconc_links, yyfilename)
+                }
+                next
+            } else {
+                # we are going to translate, and if we link, we remove the .u
+                ucodefile := basename(yyfilename, ".icn") || ".u"
+                linkline ||:= " " || quotes(ucodefile)
+                /translateducode := []
+                put(translateducode, ucodefile)
+            }
+
+            if \iconc then {
+                # mark this file as parsed
+                insert(iconc_parsed, get_abs_file_name(yyfilename))
+            }
+
+            outfilename := yyfilename
+            #
+            # run the unicon preprocessor over the selected source file and
+            # append each line processed onto the parser source string
+            #
+            yyin := ""
+            every yyin ||:= preprocessor(yyfilename, uni_predefs) do {
+                yyin ||:= "\n"
+            }
+            #
+            # if the preprocessor found errors, report errors and then stop
+            #
+            if preproc_err_count > 0 then {
+                every pe := !parsingErrors do {
+                    write(&errout, pe.errorMessage)
+                }
+                stop()      # force error exit (abruptly)
+            }
+            yylex_reinit()
+            cmd := selecticont()
+            if &features=="MS Windows NT" & &features=="console window" then{
+                wilog := tempname("uni",".tmp",,)
+                cmd ||:= " -l "|| wilog
+            }
+            cmd ||:= " -c "||icontopt||" -O "|| quotes(yyfilename) ||" "
+            if /yydbg then {
+                tmpname := tempname("uni",,,5)
+                yyout := open(tmpname, "w") |
+                    stop("can't open temporary file ",tmpname," for writing")
+                put(tmpfnames, tmpname)
+                ca_assoc(yyfilename, tmpname)
+            } else {
+                yyout := &output
+            }
+            write(yyout, "#line 0 \"", yyfilename, "\"")
+            iwrites(&errout, "Parsing ", yyfilename ,": ")
+            rv := yyparse()
+            if not (*\parsingErrors > 0) then {
+                iwrite(&errout)
+            } else {
+                every pe := !parsingErrors do {
+                    iwrite(&errout, pe.errorMessage)
+                }
+            }
+            if /yydbg then {
+                close(yyout)
+            }
+            if (rv = errors = 0) & (not (*\parsingErrors > 0)) & /parseonly then {
+                rv := mysystem(cmd || tmpname)
+                if rv ~=== 0 then {
+                    yynerrs +:= 1
+                }
+                if &features=="MS Windows NT" & &features=="console window" then {
+                    # copy icont log to our console
+                    every j := 1 to 5 do {
+                        if flog2 := open(wilog) then {
+                                while iwrite(&errout, read(flog2))
+                                close(flog2)
+                                /keeptmp & remove(wilog) | write(&errout, wilog, " - wilog B not removed.")
+                                break
+                        }
+                        delay(1000)
+                    }
+                }
+            }
+
+            if /iconc then {
+                /keeptmp & /tmpname | remove(tmpname) |
+                    iwrite(&errout,"remove ", image(tmpname), " fails")
+            }
+            reinitialize()
+        }
+    }
+
+    if /yyfilename & not find(" - ", icontopt) then {
+        write(&errout, "unicon: error: no input file")
+        unicon_usage()
+    }
+
+    #
+    # If this output is intended for consumption by iconc, suck in
+    # all files associated with link-refs and import-refs, and yyparse
+    # each of specified files once.
+    #
+    if \iconc then {
+        locallinks := table()
+        localimports := table()
+        while (*iconc_links > 0) | (*iconc_imports > 0) do {
+            while *iconc_imports > 0 do {
+                every k := key(iconc_imports) do {
+                    if member(localimports, k) then {
+                        # write("mdw: redundant import: " || k)
+                        delete(iconc_imports, k)
+                        next
+                    }
+
+                    #
+                    # mark this importref as having been processed
+                    #
+                    insert(localimports, k)
+                    delete(iconc_imports, k)
+
+                    #
+                    # get the list of files for this importref
+                    #
+                    if /(files := iconc_importref_resolve(k)) then {
+                        stop(k || ": unresolved import reference.")
+                    }
+                    #
+                    # yyparse each file associated with this importref,
+                    # unless the file has been previously yyparsed
+                    #
+                    every n := 1 to *files do {
+                        # inode := stat(files[n]).ino
+                        local_name := get_abs_file_name(files[n])
+                        # if member(iconc_parsed, inode) then
+                        if member(iconc_parsed, local_name) then {
+                            write("file \"" || local_name || "\" already parsed.")
+                            next # this file has already been parsed
+                        }
+                        #insert(iconc_parsed, inode)
+                        insert(iconc_parsed, local_name)
+                        iconc_yyparse(files[n], tmpfnames)
+                    }
+                }
+            }
+
+            while *iconc_links > 0 do {
+                every k := key(iconc_links) do {
+                    if k == "posix" then {
+                        iconc_parsed_posix := 1
+                    }
+                    if member(locallinks, k) then {
+                        # write("mdw: redundant linkref: " || k)
+                        delete(iconc_links, k)
+                        next
+                    }
+
+                    #
+                    # get the value associated with this key
+                    #
+                    v := iconc_links[k]
+                    if /v | v == "" then {
+                        stop ("bad srcfname:v: " || image(v) || " for key k=" || k || " (*.u with -C?) ")
+                    }
+
+                    #
+                    # mark this linkref as having been processed
+                    #
+                    insert(locallinks, k)
+                    delete(iconc_links, k)
+
+                    #
+                    # get the list of files for this linkref
+                    #
+                    if /(files := iconc_linkref_resolve(v, k)) then {
+                        stop(k || ": unresolved link reference.")
+                    }
+
+                    #
+                    # yyparse each file associated with this linkref,
+                    # unless the file has been previously yyparsed
+                    #
+                    every n := 1 to *files do {
+                        local_name := get_abs_file_name(files[n])
+                        if member(iconc_parsed, local_name) then {
+                            next # this file has already been parsed
+                        }
+                        insert(iconc_parsed, local_name)
+                        iconc_yyparse(files[n], tmpfnames)
+                    }
+                }
+            }
+        }
+        if /iconc_parsed_posix then {
+            iconc_yyparse(iconc_posixloc, tmpfnames)
+        }
+    }
+
+    if \iconc & (*tmpfnames > 0) & (\rv = errors = yynerrs = 0) then {
+        # transform idol output for iconc
+        every k := 1 to *tmpfnames do {
+            cfy(tmpfnames[k], (tmpfnames[k] || "-iconc"));
+        }
+        cmd := (getenv("ICONC")|"iconc") || " "
+        cmd ||:= icontopt || " "
+        if \iconc_fd & (not find("-fd", icontopt)) then {
+            cmd ||:= " -fd "
+        }
+        if /no_iconc_fs & (not find("-fs", icontopt)) then {
+            cmd ||:= " -fs "
+        }
+        cmd ||:= ilinkopt || " "
+
+        # create exename (and option) if none supplied
+        if /exename then {
+            exename := iconc_make_exename_opt(argv)
+            # write("synthesized exename: \"", exename, "\"...")
+        }
+        cmd ||:= \exename
+        if \iconc_perifile_idx then {
+            mw_tmpname := tempname("uni",,, 5)
+            ca_write(mw_tmpname, tmpfnames[iconc_perifile_idx])
+            cmd ||:= " -A " || mw_tmpname || " "
+        }
+        every k := 1 to *tmpfnames do {
+            cmd ||:= tmpfnames[k]
+            cmd ||:= "-iconc "
+        }
+
+        rv := mysystem(cmd)
+
+        # comment out if you want to look at tmp files...
+        # maybe add a command line argument to retain these someday.
+        /keeptmp & every remove(!tmpfnames || "-iconc")
+        /keeptmp & every remove(!tmpfnames)
+        /keeptmp & remove(\ mw_tmpname)
+
+        if rv ~=== 0 then {
+            errors +:= 1
+        }
+
+        if errors = 0 & \xec then {
+            if cmd := \exename then {
+                if match("-o ", cmd) then {
+                    cmd[1:4] := ""
+                }
+                if not (any('/\\', cmd) | (cmd[any(&letters,cmd)]==":")) then {
+                    cmd := "./" || cmd
+                }
+                every cmd ||:= " " || argv[xec+1 to *argv]
+                rv := system(cmd)
+            }
+        }
+    } else if /parseonly & (comp = errors = yynerrs = 0) & (not find("-E", icontopt)) then {
+        cmd := selecticont()
+        if &features=="MS Windows NT" & &features=="console window" then {
+            cmd ||:= " -l "|| (wilog := tempname("uni",".tmp",,))
+        }
+        cmd ||:= " "
+        if \exename then {
+            cmd ||:= exename
+        }
+        cmd ||:= ilinkopt
+        cmd ||:= linkline
+        if \xec then {
+            every cmd ||:= " " || argv[xec to *argv]
+        }
+
+        rv := mysystem(cmd)
+        if rv === 0 then {
+            # if no errors, and we linked them from source, remove the .u
+            /keeptmp & every remove(!\translateducode)
+        }
+        if &features=="MS Windows NT" & &features=="console window" then {
+            # copy icont log to our console
+            every j := 1 to 5 do {
+                if flog2 := open(wilog) then {
+                    while iwrite(&errout, read(flog2))
+                    close(flog2)
+                    /keeptmp & remove(wilog) | write(&errout, wilog, " wilog not removed.")
+                    break
+                }
+                delay(1000)
+            }
+        }
+    }
+    if \flog then {
+        close(flog)
+        moveto(flogname, widollog)
+    }
+
+    # Produce a non-zero exit code if there were any errors.
+    if errors + yynerrs > 0 then {
+        if (\returnErrorsFlag = 1) then {
+            return parsingErrors
+        } else {
+            return 1
+        }
+    }
+
+    # If we run the program then return its exit code
+    if \xec then {
+        return rv
+    }
+
+    return 0
+end
+
+#PD:
+#: error/warning/message handling
+#:
+procedure halt(args[])
+    errsrc()
+    every iwrites(&errout,!args)
+    istop()
+end
+
+#PD:
+#:
+#:
+procedure errsrc()
+    iwrites(&errout, "File ", \yyfilename, "; Line ", \fLine, ": Unicon/")
+end
+
+#PD:
+#: Canonize a path.  This involves :-
+#:   - lower-casing the name (Windows only)
+#:   - changing backslashes to forward slashes (Windows)
+#:   - expanding non-absolute paths to absolute ones using chdir()
+#:   - adding a trailing /
+#:   - removing any ".." or "." directories
+#:
+procedure canonize(path)
+    local res, cd
+
+    path := map(path, "\\", "/")
+
+$ifdef _MS_WINDOWS_NT
+    path := map(path)
+    if not (path[1:3] == "//" | path[2:4] == ":/") then {
+        cd := map(chdir(), "\\", "/")
+        if path[1] == "/" then {
+            # Root of current drive.
+            path := cd[1:3] || path
+        } else {
+            path := cd || "/" || path
+        }
+    }
+$else
+    if path[1] ~== "/" then {
+        path := chdir() || "/" || path
+    }
+$endif
+
+    if path[-1] ~== "/" then {
+        path ||:= "/"
+    }
+    res := ""
+    path ? repeat {
+        res ||:= tab(upto('/') | 0)
+        if pos(0) then {
+            break
+        }
+        if match("/../") then {
+            move(3)
+            while res[-1] ~== "/" do
+                res[-1] := ""
+            res[-1] := ""
+        } else if match("/./") then {
+            move(2)
+        } else {
+            res ||:= move(1)
+        }
+    }
+    return res
+end
+
+#PD:
+#:
+#:
+procedure writelink(dir, s)
+    if \iconc then {
+        # do not generate linkrefs in
+        # code that will be sent to iconc...
+        return
+    }
+    if map(s[-4:0]) == ".icn" then {
+        s[-4:0] := ""
+    }
+    write(yyout, "link \"", canonize(dir), map(s, "\\", "/"), "\"")
+    outline +:= 1
+end
+
+#PD:
+#:
+#:
+procedure trans(argstr, prefix)
+    if find("iconc", mygetenv("ICONT")) then {
+        return # iconc --> don't translate
+    }
+    return icont(" -c " || argstr, prefix)
+end
+
+#PD:
+#:
+#:
+procedure icont(argstr,prefix)
+    static  trans,                      #SV:
+            logger                      #SV:
+    local   myfile,                     #LV:
+            rv                          #LV:
+
+    initial {
+        trans := selecticont()
+        logger := mygetenv("WICONLOG") | (getenv("TEMP")||"\\winicon.log")
+    }
+    if \logger then {
+        remove(logger) | write( logger, " - log not removed.")
+    }
+    rv := mysystem((\prefix|"") || trans || icontopt || argstr)
+    if \flog then {
+        if \logger then {
+            if myfile := open(logger) then {
+                while write(flog, read(myfile))
+                close(myfile)
+            }
+        }
+    }
+    return rv
+end
+
+#PD:
+#:
+#:
+procedure mygetenv(s)
+    return if &features == "environment variables" then {
+        getenv(s)
+    }
+end
+
+#PD:
+#:
+#:
+procedure moveto(src, dest)
+    local f1, f2
+    f1 := open(src) |
+          {
+              write(&errout, src, " - cannot be opened for reading")
+              fail
+          }
+    f2 := open(dest,"w") |
+          {
+              write(&errout, dest, " - cannot be opened for writing")
+              fail
+          }
+    while write(f2, read(f1))
+    close(f1)
+    close(f2)
+    remove(src) | write(&errout, src, " - src not removed.")
+    return
+end
+
+#PD:
+#: find the icont to use. An ICONT variable overrides defaults.
+#:
+procedure selecticont()
+    local cmd, dash_s
+    if not (cmd := mygetenv("ICONT")) then {
+
+        #
+        # if we find binaries via path search, use them; otherwise
+        # try for binaries directory via &progname.  Won't be very
+        # successful
+        #
+        cmd := ((&features ? (="Binaries at " & tab(0))) |
+                (&progname ? tab(find("unicon"))) |
+                ""
+               )
+
+        if &features=="MS Windows NT" then {
+            if (cmd ~== "") & (not (cmd[-1] == "\\")) then {
+                cmd ||:= "\\"
+            }
+            if &features=="console window" then {
+                cmd ||:= "wicont.exe"
+                dash_s:=1
+            } else {
+                cmd ||:= "icont.exe"
+            }
+        } else {
+            if (cmd ~== "") & (not (cmd[-1] == "/")) then {
+                cmd ||:= "/"
+            }
+            cmd ||:= "icont"
+        }
+    }
+
+    cmd := quotes(cmd)
+
+    if not stat(cmd) then {
+        write("warning: no icont found thought it would be\n\t", cmd)
+    }
+
+    if \dash_s then {
+        cmd ||:= " -s"
+    }
+    return cmd
+end
+
+#PD:
+#:
+#:
+procedure warn(args[])
+    errsrc()
+    every iwrites(&errout,!args)
+    iwrite(&errout)
+end
+
+#PD:
+#:
+#:
+procedure warning(s, lineno, filenam)
+    /warnings := 0
+    /errors := 0
+    if warnings + errors = 0 then {
+        iwrite(&errout)
+    }
+    iwrites(&errout, \(filenam|yyfilename), ":")
+    iwrite(&errout, \lineno|yylineno, ": # \"", yytext, "\": ", s)
+    warnings +:= 1
+end
+
+#PD:
+#:
+#:
+procedure quotes(s)
+    if find(" ", s) then {
+        s := "\"" || s || "\""
+    }
+    return s
+end

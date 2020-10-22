@@ -1,0 +1,10 @@
+#
+# main() procedure for Unicon compiler.  In a separate module so that the
+# compiler can be linked in as a procedure within larger programs such
+# as IDEs.
+#
+link    unicon
+
+procedure main(argv)
+    exit(unicon(argv))
+end

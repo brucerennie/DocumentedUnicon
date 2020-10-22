@@ -1,0 +1,1316 @@
+
+package Compiler
+
+
+link io                                 #LK:
+
+global  imported                        #GV:
+
+
+#
+# classspec database (DBM) entry
+#
+record db_entry(dir, entry)
+
+#PD:
+#: find a class specification, along the IPATH if necessary
+#:
+procedure fetchspec(name)
+    static  white,                      #SV: holds the applicable whitespace
+                                        #:   characters for reading class
+                                        #:   specifications
+            nonwhite                    #SV: holds the inverse of white
+
+    local   basedir := ".",             #LV: hold the base directory in which
+                                        #:   to find the class database, defaults
+                                        #:   to the current working directory
+            tmplst := tail(name),       #LV: tempory to hold the split of name
+                                        #:   when name is a specified file path
+            dir                         #LV: used for the directory currently
+                                        #:   being looked at
+            ipath,                      #LV: hold the current paths that are
+                                        #:   to be searched if cannot find the
+                                        #:   class database in the specified
+                                        #:   directory in name or current
+                                        #:   working directory
+            f,                          #LV: temporary to hold a file descriptor
+                                        #:   for the class database being accessed
+            s                           #LV: temporary to hold the selected
+                                        #:   string value from the class database
+
+    initial {
+        #
+        # whitespace is defaulted to space and tab
+        #
+        white := " \t"
+        #
+        # however, if this is running under Microsoft Windows then we add ";" to
+        # the list of valid whitespace characters
+        #
+        if &features == "MS Windows NT" then {
+            white ++:= ';'
+        }
+        #
+        # we can now create the complement of white and assign to nonwhite
+        #
+        nonwhite := &cset -- white
+    }
+    basedir := ("" ~== tmplst[1])
+    name := tmplst[2]
+    if f := open(basedir || "/" || env, "dr") then {
+        if s := fetch(f, name) then {
+            close(f)
+            return db_entry(basedir, s)
+        }
+        close(f)
+    }
+
+    if basedir ~== "." then {
+        fail         # if it gave a path, don't search IPATH
+    }
+
+    ipath := ipaths()
+
+    #
+    # search the ipath list of directories for the class database which holds
+    # the class/package specified by name
+    #
+    \ipath ? {
+        tab(many(white))
+        dir := ""
+        while dir ||:= tab(many(nonwhite)) do {
+            #
+            # collect the parts of a path that contains whitespace
+            #
+            if *dir > 0 & dir[1] == "\"" & dir[-1] ~== "\"" then {
+                dir ||:= tab(many(white)) | { fail }
+            } else {
+                #
+                # remove " from a path containing whitespace from the start and end
+                #
+                if dir[1] == dir[-1] == "\"" then {
+                    dir := dir[2:-1]
+                }
+                #
+                # check if the selected path contains a class database, and if
+                # it does check to see if it has the specified class/package in it
+                #
+                if f := open(dir || "/" || env, "dr") then {
+                    if s := fetch(f, name) then {
+                        close(f)
+                        return db_entry(dir, s)
+                    }
+                    close(f)
+                }
+                #
+                # skip whitespace between paths
+                #
+                tab(many(white))
+                dir := ""
+            }
+        }
+    }
+end
+
+#PD:
+#: initialise the global variables needed for searching for classes
+#
+procedure reinitialize()
+    classes  := taque()
+    links := []
+    imports := []
+    imported := table()
+    imported_classes := table()
+    thePackage := &null
+end
+
+#PD:
+#: procedure to read a single Idol source file
+#:
+procedure readspec(name)
+    local   s,                          #LV: local temporary for string processing
+            dbe,                        #LV: storage for the db_entry returned
+                                        #:   for the class/package specified by name
+            L,                          #LV: holds a list of records from the
+                                        #:   class database record for name,
+                                        #:   records are specified by a newline
+                                        #:   appearing in various positions in
+                                        #:   the class databse record
+            decl                        #LV: used as a temporaty to hold the
+                                        #:   declaration information found in the
+                                        #:   class declaration in the class database
+
+    if not (dbe := fetchspec(name)) then {
+        stop("fatal: can't read spec for class ", name)
+    }
+
+    s := dbe.entry
+    yyfilename := name
+    fLine := 0
+    #
+    #Code Review Required
+    #
+    # this code should be changed to either fail or display error and stop
+    # this needs discussion with Clinton as to what should be happening here
+    #
+    if /s then {
+        write("fetchspec ", name, " returned null")
+    }
+    #
+    # from the class database record, create a list of lines determined. This is
+    # detern=mined by the \n appearing in the class database record
+    #
+    s ? {
+        L := []
+        while line := tab(find("\n") | 0) do {
+            put(L, line)
+            move(1)
+            #
+            #Code Review Required
+            #
+            # is this extraneous code? as control expression will fail after hitting
+            # the end of string and there should not be any reason to have to test
+            # for end of string to stop processing
+            #
+            if pos(0) then break
+        }
+    }
+    #
+    # the first field/record extracted from the class database record is the
+    # filename of the source code file associated with this class database
+    # record
+    #
+    fromfile := pop(L)
+    #
+    # process eacjh of the other fields/records extracted from the class database
+    # reocrd, one for each of the global definitions within the source file
+    #
+    while line := pop(L) do {
+        line ? {
+            #
+            # skip any extraneous whitespace at start of line
+            #
+            tab(many(white))
+            #
+            # the only valid values to be found are "class", "procedure", "record",
+            # "global" and "link". The value "const" is no longer valid in unicon source.
+            # "method" should never be found as it should fail the unicon compile
+            # process.
+            #
+            # changes here need to be discussed with Clinton as to what and how
+            # he would like the code changed
+            #
+            if ="class" then {                      # process the class definition information
+                decl := Class()
+                decl.dir := dbe.dir
+                decl.linkfile := fromfile
+                decl.Read(line,L)
+                #insert into table for lookup, but not into list for generation
+                classes.insert_t(decl,decl$name())
+            }
+            else if ="procedure" then {             # process the procedure definiton information
+                if comp = 0 then comp := 1
+                decl := Method("")
+                decl$Read(line)
+                decl$Write(fout,"")
+            }
+            else if ="record" then {                # process the record definition information
+                if comp = 0 then comp := 1
+                decl := declaration(line)
+                decl$Write(fout,"")
+            }
+            else if =("global" | "link") then {     # process the global/link definition information
+                if comp = 0 then comp := 1
+                tab(many(white))
+                if pos(0) then line ||:= readln("wrap")
+                decl := vardecl(line)
+                decl$Write(fout,"")
+            }
+            else if ="const" then {                 # deprecated as it is not found in any unicon class
+                                                    # database file
+                ct$append ( constdcl(line) )
+            }https://www.youtube.com/user/flash001USA/videos
+            else if ="method" then {                # deprecated as it is not found in any uniocn class
+                                                    # database file
+                halt("readinput: method outside class")
+            }
+            else if upto(nonwhite) then {           # this would cover all errors including "const"and "method"
+                halt("expected declaration of \"class\", \"procedure\", \"record\", \"global\" or \"link\" on: ",line)
+            }
+        }
+        #
+        #Code Review Required
+        #
+        # is this extraneous code? as control expression will fail after hitting
+        # the end of string and there should not be any reason to have to test
+        # for end of string to stop processing
+        #
+        if pos(0) then break
+    }
+end
+
+#PD:
+#:
+#:
+procedure methodstaque(node, cl, taq)
+   /taq := taque()
+   case type(node) of {
+         "treenode": {
+            if (node.label ~=== "global") & (node.label ~=== "record") then {
+               if *node.children > 0 then
+                  every methodstaque(!node.children, cl, taq)
+               else write("leaf ", node.label)
+               }
+            else {
+               cl.insertglobal(node)
+               }
+            }
+         "Method__state": {
+            node.Class := cl
+            if not (taq$insert(node, node$name())) then {
+               uni_error("method " || node$name() ||
+                       " redeclared in " || cl.name)
+               }
+            }
+         "null": { }
+         "token": {
+            write("token ", tokenstr(node.tok), " line ", node.line, " file ", node.filename)
+            }
+         "declaration__state" : {
+            # Record declaration.
+            cl.insertglobal(node)
+            }
+         default: {
+            write("methods Taque on ", type(node), " : ", image(node))
+            }
+      }
+   return taq
+end
+
+#PD:
+#: This needs to be looked at carefully to determine what it is actually trying
+#: to achieve. Code needs to be commented as to what/why
+#:
+procedure import_class(node)
+    local   s,                          #LV:
+            pack,                       #LV:
+            tempp                       #LV:
+
+    /imported := ::table()
+    if ::type(node) == "treenode" & node.label == "implist" then {
+        import_class(node.children[1])
+        import_class(node.children[3])
+    } else if node.tok = IDENT then {
+        tempp := Package(node.s)
+        if /tempp.dir then {
+            uni_error("Unable to import (1) package " || image(node.s))
+        }
+        tempp.add_imported()
+    } else if node.tok = STRINGLIT then {
+        node.s ? {
+            move(1)
+            pack := ""
+            while pack ||:= tab(upto('/\\')) || move(1)
+            if pack ||:= tab(find(".")) then {
+                move(1)
+                s := tab(-1)
+            } else {
+                pack ||:= tab(-1)
+            }
+        }
+
+        tempp := Package(pack)
+        if /tempp.dir then {
+            uni_error("Unable to import (2) package " || image(pack))
+        }
+        tempp.add_imported(s)
+    }
+end
+
+###############################################################################
+###############################################################################
+#
+# Class definitions from IDOL used in the Unicon Compiler
+#
+###############################################################################
+###############################################################################
+
+#CD:
+#: class Table
+#: This class corresponds to an Icon table, with the difference a key and its
+#: associated value can only be inserted once, therafter no update is allowed
+#: against the key value.
+#:
+#: If used in a class hieraarchy, the table storage value will be created on the
+#: first key inserted. If no keys have been inserted, the size will always
+#: remain at 0
+#:
+#: Any key that has not been previously inserted will always return &null, unlike
+#: the default value that can be specified for a normal Icon table
+#:
+class Table(
+    __table                             #CV: holds a unicon/icon table value
+)
+    #MD:
+    #: returns the size of the allocated table and if not allocated return 0
+    #:
+    method size()
+        return (* \__table) | 0
+    end
+
+    #MD:
+    #: Insert a new key and its associated value, if an update to the value is
+    #: attempted, the insert will fail. If the key is not supplied, the value
+    #: becomes the key
+    #:
+    method insert(x, key)
+        /__table := ::table()
+        /key := x
+        if (/ (__table[key])) := x then {
+            return
+        }
+    end
+
+    #MD:
+    #: Lookup the value associated with the supplied key and return it. If the
+    #: key is not in the table then return &null.
+    #:
+    method lookup(key)
+        if \__table then {
+            return __table[key]
+        }
+        return
+    end
+
+    #MD:
+    #: returns the values associated with each key in the table. No particular
+    #: order is defined
+    #:
+    method foreach()
+        if \__table then {
+            suspend !__table
+        }
+    end
+
+#MD:
+#: if the class Table is called by itself, it will initialise the class variable
+#: __table to an unicon/icon table value
+#:
+initially()
+    /__table := ::table()
+end
+
+#CD:
+#: class taque
+#: This class represents a tabular queues defining objects which maintain
+#: synchronized list and table reps
+#:
+#: Is this comment true or false : Well, what is really provided are
+#: loosely-coordinated list/tables
+#:
+class taque : Table (
+    __list                              #CV: holds the list representation of
+                                        #:   keys that have been inserted into
+                                        #:   the Table portion of this object
+)
+
+    #MD:
+    #: returns the size of the allocated list and if not allocated return 0
+    #:
+    method size()
+        return (* \__list) | 0
+    end
+
+    #MD:
+    #: insert a key-value pair into the object, with the values being appended
+    #: to the list representation only if the insertion has successfully occurred
+    #: into the table.
+    #:
+    method insert(x, key)
+        /__list := []
+        if self$Table.insert(x, key) then {
+            ::put(__list, x)
+            return
+        }
+    end
+
+    #MD:
+    #: insert a key-value pair into the object, with the values being prepended
+    #: to the list representation only if the insertion has successfully occurred
+    #: into the table.
+    #:
+    method Push(x, key)
+        /__list := []
+        if self$Table.insert(x, key) then {
+            ::push(__list, x)
+            return
+        }
+    end
+
+    #MD:
+    #: alternative name for the insert method
+    #:
+    method Put(x, key)
+        return insert(x, key)
+    end
+
+    #MD:
+    #: returns each key in the table storage, in the sequence/order that they
+    #: were inserted
+    #:
+    method foreach()
+        if \__list then {
+            suspend !__list
+        }
+    end
+
+    #MD:
+    #: insert the key-value pair into the table portion of the object, with no
+    #: insertion of the key into the list protion of the object
+    #:
+    method insert_t(x, key)
+        return self$Table.insert(x, key)
+    end
+
+    method foreach_t()
+        suspend self$Table.foreach()
+    end
+
+#MD:
+#: if the class taque is called by itself, it will initialise the class variable
+#: __list to an unicon/icon list value and the corresponding __table to an
+#: unicon/icon list value
+#:
+initially()
+    /__list := []
+    self$Table.initially()
+end
+
+#CD:
+#: class idTaque
+#: support for taques found as lists of ids separated by punctuation
+#:
+class idTaque : taque(
+    __punc                              #CV: the seperator character to be used
+)
+
+    method parse(s)
+        local name
+        s ? {
+            tab(many(white))
+            while name := tab(find(self.punc)) do {
+                self$insert(trim(name,white))
+                move(1)
+                tab(many(white))
+            }
+            if any(nonwhite) then {
+                self$insert(trim(tab(0),white))
+            }
+        }
+        return
+    end
+
+    #MD:
+    #: Traverse a given subtree, adding its contents to myself.
+    #: Routinely called in the constructor after a comma-separated
+    #: list of identifiers have been parsed; also called on "local"
+    #: declarations in classes to append them onto the initial list.
+    #:
+    method traverse(nod, isClassLocal)
+        local   accum
+        case ::type(nod) of {
+            "treenode": {
+                if *nod.children > 0 then {
+                    if nod.label == ("arg" || (2 to 8)) then {
+                        if /isClassLocal then {
+                            insert(nod, nod.children[1].s)
+                        } else {
+                            insert(nod.children[1].s)
+                        }
+                    } else if nod.label == "varlist2" then {
+                        if /isClassLocal then {
+                            insert(nod, nod.children[1].s)
+                        } else {
+                            insert(nod.children[1].s)
+                            nod := copy(nod)
+                            nod.label := "assign"
+                            return nod
+                        }
+                    } else if nod.label==("varlist3"|"varlist4") then {
+                        traverse(nod.children[1], isClassLocal)
+                        if /isClassLocal then {
+                            insert(nod, nod.children[3].s)
+                        } else {
+                            insert(nod.children[3].s)
+                        }
+                    } else {
+                        accum := []
+                        every \(x := traverse(!nod.children, isClassLocal)) do {
+                            put(accum, x)
+                        }
+                        accumtree := &null
+                        while x := pull(accum) do {
+                            accumtree := node("procbody", x, ";", accumtree)
+                        }
+                        return accumtree
+                    }
+                } else {
+                    write("leaf ", nod.label)
+                }
+            }
+            "token": {
+                if nod.tok = IDENT then {
+                    insert(nod.s)
+                }
+            }
+            "string": {
+                if (nod ~== self.punc) & (nod ~== ";") then {
+                    write("idTaque on ", type(nod), " : ", image(nod), " (punc was ",image(punc),")")
+                }
+            }
+            "null": { }
+            default: {
+                write("idTaque on ", type(nod), " : ", image(nod))
+            }
+        }
+        return
+    end
+
+    #MD:
+    #: display this object as a string value
+    #:
+    method String()
+        local   out,                    #LV: used to construct the string representation
+                                        #:   of the object
+                id                      #LV: temporary to hold each element of
+                                        #:   the taque
+
+        #
+        # if there is nothing stored in the object yet, just return the empty
+        # string as the representation
+        #
+        if /__list then {
+            return ""
+        }
+        out := ""
+        every id := !__list do {
+            if ::type(id) == "treenode" then {
+                id := id.children[1].s
+            }
+            out ||:= id || self.punc
+        }
+        #
+        # don't return the last punctuation character
+        #
+        return out[1:-1]
+    end
+
+#MD:
+#: if the class is called with no value as the seperator, this will be set to " "
+#: most uses of idTaque will specify the required seperator character
+#:
+#: since no parameter fields are specified, the object fields will be filled
+#: directly by the class call
+#:
+initially
+    local   argtree                     #LV: holds whatever value was used when
+                                        #:   the object was created during the
+                                        #:   compiler parsing process
+
+    /__punc := " "
+    self$taque.initially()
+    if ::type(\__list) ~== "list" then {
+        argtree := __list
+        __list := []
+        if ::type(argtree) == "token" then {
+            insert(argtree.s)
+        } else {
+            traverse(argtree)
+        }
+    }
+end
+
+#CD:
+#: Abstract class for objects resulting from parsing lines of the form
+#:   tag name ( field1 , field2, ... )
+#:
+class declaration(
+    __name,                             #CV:
+    __fields,                           #CV:
+    __tag,                              #CV:
+    lptoken,                            #CV:
+    rptoken                             #CV:
+)
+
+    #MD:
+    #: return the name associated with this declaration
+    #:
+    method name()
+        return __name
+    end
+
+    #MD:
+    #: set the name associated with this declaration
+    #:
+    method setname(s)
+        __name := s
+    end
+
+    #MD:
+    #: parse a declaration string into its components
+    #:
+    method Read(decl)
+        decl ? (
+            #
+            # skip whitespace if any
+            #
+            (tab(many(white)) | ""),
+            #
+            # get my tag, this will be a procedure, class, method, record or package
+            # declaration
+            #
+            (self.tag := =("procedure" | "class" | "method" | "record" | "package")),
+            #
+            # skip whitespace if any
+            #
+            (tab(many(white)) | "") ,
+            #
+            # get my name, a standard identifier, the following is not quite correct,
+            # need to check if there are any situations in which this will not give
+            # the correct result.
+            #
+            (self.name := tab(many(alpha))) ,
+            #
+            # we expect to find ( as the next character
+            #
+            (tab(find("(")+1))\1,
+            (tab(many(white)) | "") ,
+            ((self.fields := classFields())$parse(tab(find(")")\1))),
+            =")",
+            (tab(many(white)) | ""),
+            pos(0)
+        ) | halt("declaration/read can't parse decl ",decl)
+    end
+  #
+  # write a declaration
+  #
+  method Write(f)
+      yyprint(tag)
+      yyprint(name)
+      yyprint(lptoken)
+      yyprint(fields)
+      yyprint(rptoken)
+  end
+  #
+  # convert self to a string
+  #
+  method String()
+    flds := (\(self.fields))$String() | ""
+if / (self.tag) then {
+   write("null tag in ", image(self.name), " object ", image(self))
+}
+    return self.tag || " " || self.name || "(" || flds || ")"
+  end
+initially
+   tmpcount := 0
+end
+
+#CD:
+#: parameter lists in which the final argument may have a trailing []
+#: The "[]" varg parameter is passed in by the parser if it is present.
+#:
+class argList : idTaque(
+    __varg                              #CV:
+)
+
+    #MD:
+    #:
+    #:
+    method ispublic()
+        ::write("Idol class: argList.ispublic()")
+        fail
+    end
+
+    #MD:
+    #:
+    #:
+    method coercions()
+        local   first,                  #LV:
+                x,                      #LV:
+                v                       #LV:
+
+        ::write("Idol class: argList.coercions()")
+        every x := !\__list do {
+            if ::type(x) == "treenode" then {
+                if /first := 1 then {
+                    ::write(yyout)
+                }
+                v := x.children[1].s
+                if x.label == ("arg3" | "arg4") then {
+                    ::write(yyout, "/", v, " := ", x.children[-1].s)
+                } else if x.label == ("arg5" | "arg6") then {
+                    ::write(yyout, "/", v, " := &", x.children[-1].children[-1].s)
+                } else if x.label == ("arg7" | "arg8") then {
+                    ::write(yyout, "/", v, " := []")
+                }
+                if x.label == ("arg2" | "arg4" | "arg6") then {
+                    case x.children[3].s of {
+                        "integer" | "string" | "numeric" | "cset" | "real": {
+                            ::writes(yyout, v, " := ", x.children[3].s, "(",  v, ") |")
+                        }
+                        default: {
+                            ::writes(yyout, "(type(", v, ")==\"", x.children[3].s, "\") |")
+                        }
+                    }
+                    ::writes(yyout, " runerr(")
+                    ::writes(yyout,
+                             case x.children[3].s of {
+                                 "integer": 101
+                                 "numeric": 102
+                                 "string": 103
+                                 "cset": 104
+                                 "file": 105
+                                 "list": 108
+                                 "set": 119
+                                 "table": 124
+                                 "window": 140
+                                 default: 123
+                             })
+                    ::write(yyout, ", ", v, ")")
+                }
+            }
+        }
+    end
+
+    #MD:
+    #:
+    #:
+    method String()
+        ::write("Idol class: argList.String()")
+        return self$idTaque.String() || ((\self.__varg & "[]") | "")
+    end
+
+    #MD:
+    #:
+    #:
+    method Write(f)
+        ::write("Idol class: argList.Write()")
+        ::writes(f, String())
+    end
+#MD:
+#:
+#:
+initially
+    write("Idol class: argList.initially()")
+    self.__punc := ","
+    self$idTaque.initially()
+end
+
+#CD:
+#: Idol class field lists in which fields may be preceded by a "public" keyword
+#:
+class classFields : argList(
+    __publics                           #CV:
+)
+
+    #MD:
+    #: This should always fail, need to check where this is called and adjust code
+    #: accordingly
+    #:
+    method ispublic(s)
+        write("Idol class: classFields.ispublic()")
+        if \self.__publics then {
+            suspend !self.__publics == s
+        }
+    end
+
+    #MD:
+    #: since "public" is not an option, this part of the code should be able to
+    #: be deleted and the insert method of arglist, called directly.
+    #:
+    method insert(s)
+        write("Idol class: classFields.insert()")
+        s ? {
+            if ="public" & tab(many(white)) then {
+                s := tab(0)
+                /self.publics := []
+                put(self.publics, s)
+            }
+        }
+        return self$argList.insert(s)
+    end
+end
+
+#CD:
+#: Attributes and operations of classes
+#:
+class Class : declaration (
+    __supers,                           #CV:
+    __methods,                          #CV:
+    text,                               #CV:
+    imethods,                           #CV:
+    ifields,                            #CV:
+    __glob,                             #CV:
+    linkfile,                           #CV:
+    dir,                                #CV:
+    unmangled_name,                     #CV:
+    supers_node                         #CV:
+)
+
+  method ismethod(id)
+    write("Idol class: Class.ismethod()")
+     if \ (self.methods$lookup(id)) | (!\self.imethods).ident == id then
+        return
+  end
+
+  method isfield(id)
+    write("Idol class: Class.isfield()")
+     if \ (self.fields$lookup(id)) | (!\self.ifields).ident == id then
+        return
+  end
+
+    #MD:
+    #:
+    #:
+    method Read(line, L)
+        write("Idol class: Class.Read()")
+        self$declaration.Read(line)
+        self.__supers := idTaque(":")
+        self.__supers.parse(line[find(":",line)+1:find("(",line)] | "")
+        self.__methods := taque()
+        self$ReadBody(0, L)
+    end
+
+    #MD:
+    #:
+    #:
+    method ReadBody(depth, L)
+        write("Idol class: Class.ReadBody()")
+        while line  := pop(L) do {
+            line ? {
+                tab(many(white))
+                if ="initially" then {
+                    (cf := classFields()).parse("")
+                    decl := Method(self.name, self.text, , cf, "method")
+                    decl.setname("initially")
+                    self.__methods.insert(decl, "initially")
+                } else if ="method" then {
+                    decl := Method(self.name)
+                    decl.Read(line, phase)
+                    self.__methods.insert(decl, decl$name())
+                } else if ="end" & pos(0) then {
+                    # "end" is tossed here. see "initially" above
+                    return
+                } else if ="procedure" then {
+                    decl := Method("")
+                    decl.Read(line, phase)
+                    insertglobal(decl)
+                } else if ="global" then {
+                    insertglobal(vardecl(line))
+                } else if ="record" then {
+                    insertglobal(declaration(line))
+                } else if upto(nonwhite) then {
+                    decl := Method(self.name)
+                    decl.Read("method " || line || "()", phase)
+                    self.methods.insert(decl,decl$name())
+                }
+            }
+        }
+        if depth = 0 then
+           halt("class/read syntax error: eof inside a class definition")
+    end
+
+  #
+  # Miscellaneous methods on classes
+  #
+  method has_initially()
+    write("Idol class: Class.has_initially()")
+    return (methods$foreach())$name() == "initially"
+  end
+
+
+    #MD:
+    #:
+    #:
+    method ispublic(fieldname)
+        write("Idol class: Class.ispublic()")
+        if self.__fields.ispublic(fieldname) then {
+            return fieldname
+        }
+    end
+
+    #MD:
+    #:
+    #:
+    method foreachmethod()
+        write("Idol class: Class.foreachmethod()")
+        suspend __methods.foreach()
+    end
+
+    #MD:
+    #:
+    #:
+    method foreachsuper()
+        write("Idol class: Class.foreachsuper()")
+        suspend __supers.foreach()
+    end
+
+    #MD:
+    #:
+    #:
+    method foreachfield()
+        write("Idol class: Class.foreachfield()")
+        suspend __fields.foreach()
+    end
+
+    method insertglobal(glob)
+        /__glob := []
+        ::put(__glob, glob)
+        return self
+    end
+
+  method isvarg(s)
+    write("Idol class: Class.isvarg()")
+    if self.fields$isvarg(s) then return s
+  end
+  method transitive_closure()
+    write("Idol class: Class.transitive_closure()")
+    count := supers$size()
+    while count > 0 do {
+        added := taque()
+        every sc := supers$foreach() do {
+          if /(super := classes$lookup(sc)) then
+            halt("class/transitive_closure: couldn't find superclass ",sc)
+          every supersuper := super$foreachsuper() do {
+            if / self.supers$lookup(supersuper) &
+                 /added$lookup(supersuper) then {
+              added$insert(supersuper)
+            }
+          }
+        }
+        count := added$size()
+        every self.supers$insert(added$foreach())
+    }
+  end
+  #
+  # write the class declaration: if s is "class" write as a spec
+  # otherwise, write as a constructor
+  #
+  method writedecl(f,s)
+    write("Idol class: Class.writedecl()")
+    writes(f, s," ",self.name)
+    if s=="class" & ( *(superstr := self.supers$String()) > 0 ) then
+            writes(f," : ",superstr)
+    writes(f,"(")
+
+    if s~=="class" &
+       ((("initially" == (m := (methods$foreach()))$name()) &
+       (m.fields ~=== &null)) |
+       (((mn := !(self.imethods)).ident == "initially") &
+        (m := classes.lookup(mn.Class).methods.lookup("initially")) &
+        (m.fields ~=== &null)) ) then {
+       yyprint(m.fields)
+       }
+    else {
+       rv := self.fields$String(s)
+       if *rv > 0 then rv ||:= ","
+       if s~=="class" & *(\self.ifields)>0 then {       # inherited fields
+         every l := !self.ifields do {
+            lid := l.ident
+            if type(lid) == "string" then
+               rv := rv || lid || ","
+            else if type(lid)=="treenode" & lid.label == "arg3" then {
+               rv := rv || (lid.children[1].s)
+               if s=="class" then {
+                  rv := rv || ":" || lid.children[3].s
+                  }
+               rv := rv || ","
+               }
+            else stop("Write(): can't handle ", type(ifi))
+            }
+         # resolve the last field in order to see if it is a vararg
+         if /(superclass := classes$lookup(l.Class)) then
+            halt("class/resolve: couldn't find superclass ",sc)
+         if superclass$isvarg(l.ident) then rv := rv[1:-1]||"[],"
+         }
+       writes(f,rv[1:-1])
+       }
+    write(f,,")")
+  end
+  method WriteSpec() # write the specification of a class
+    write("Idol class: Class.WriteSpec()")
+    f := open(env,"d") | {
+       write(&errout, "can't open class database ", image(env),
+             " to write spec for ",self.name)
+       fail
+       }
+
+    nam := self.name
+    s := yyfilename || "\nclass " || nam
+    if *(superstr := self.supers$String()) > 0 then {
+       s ||:= " : "; s ||:= superstr
+       }
+    s ||:= "("
+    rv := self.fields$String(s)
+    if *rv > 0 then rv ||:= ","
+    s ||:= rv[1:-1]
+    s ||:= ")\n"
+    every s ||:= (methods$foreach())$mkspec()
+    s ||:= "end\n"
+#    if *(self.name) + *s > 1023 then { # need to compress s
+#       f2 := open("gzip.out", "w")
+#       writes(f2,s)
+#       close(f2)
+#       f2 := open("gzip -c gzip.out","p")
+#       s := "\^z" || reads(f2,100000)
+#       close(f2)
+#       remove("gzip.out")
+#       }
+
+    insert(f, nam, s) |
+       stop("...insert fails on ", image(nam), " value of size ", *s)
+    close(f)
+    f := open(env,"d") | stop("no check")
+    s := fetch(f, nam) | stop("fetch(", image(nam),") fails")
+    close(f)
+  end
+
+  #
+  # write out the Icon code for this class' explicit methods
+  # and its "nested global" declarations (procedures, records, etc.)
+  #
+  method writemethods(f)
+    write("Idol class: Class.writemethods()")
+
+    every (methods$foreach())$Write(f)
+
+    if \__glob & *__glob > 0 then {
+        write(f,"#\n# globals declared within the class\n#")
+        every i := 1 to *__glob do
+           yyprint(__glob[i])
+        write(f)
+    }
+  end
+
+  #
+  # write - write an Icon implementation of a class to file f
+  #
+  method Write(f)
+    write("Idol class: Class.Write()")
+
+    nam := self.name
+    yyprint("\n")
+    writemethods(f)
+    #
+    # must have done inheritance computation to write things out
+    #
+    if /self.ifields then self$resolve()
+
+    #
+    # write a record containing the state variables
+    #
+    write(f,"#line 1 \"__faux.icn\"")
+    writes(f,"record ",nam,"__state(__s,__m") # reserved fields
+    rv := ","
+    rv ||:= self.fields$idTaque.String()                     # my fields
+    if rv[-1] ~== "," then rv ||:= ","
+
+    every ifi := (!self.ifields).ident do {
+       if type(ifi) == "string" then
+          rv := rv || ifi || "," # inherited fields
+       else if type(ifi) == "treenode" & ifi.label == "arg3" then {
+            rv := rv || (ifi.children[1].s) || ","
+            }
+       else stop("Write(): can't handle ", type(ifi))
+       }
+
+    yyprint(rv[1:-1] || ")\n")
+
+    #
+    # write a record containing the methods
+    #
+    writes(f,"record ",nam,"__methods(")
+    rv := ""
+    every s := (((methods$foreach())$name())    |       # my explicit methods
+                (!self.imethods).ident          |       # my inherited methods
+                supers$foreach()
+                )                               # super.method fields
+        do rv := rv || s || ","
+
+    if *rv>0 then rv[-1] := ""                  # trim trailling ,
+    yyprint(rv||")\n")
+
+    #
+    # write a global containing this classes' operation record
+    # along with declarations for all superclasses op records
+    #
+    writes(f,"global ",nam,"__oprec")
+    every writes(f,", ", supers$foreach(),"__oprec")
+    yyprint("\n")
+
+    #
+    # write the constructor procedure.
+    # This is a long involved process starting with writing the declaration.
+    #
+    self$writedecl(f,"procedure")
+    yyprint("local self,clone\n")
+
+    #
+    # initialize operation records for this and superclasses
+    #
+    yyprint("initial {\n  if /"||nam||"__oprec then "||nam||"initialize()\n")
+    if supers$size() > 0 then
+        every (super <- supers$foreach()) ~== nam do
+            yyprint("  if /"||super||"__oprec then "||super||"initialize()\n"||
+                    "  "||nam||"__oprec."||super||" := "|| super||"__oprec\n")
+    yyprint("  }\n")
+
+
+    #
+    # If the class field list has or inherits defaults, write them out.
+    #
+    every fld := fields$foreach() do {
+        if type(fld) == "treenode" & fld.label == "arg3" then {
+            writes(f,"/",fld.children[1].s, " := ")
+            yyprint(fld.children[3])
+            yyprint("\n")
+            }
+        }
+    every ifi := (!(self.ifields)).ident do {
+       if type(ifi) == "treenode" & ifi.label == "arg3" then {
+          writes(f,"/",ifi.children[1].s, " := ")
+          yyprint(ifi.children[3])
+          yyprint("\n")
+          }
+       }
+
+
+    #
+    # create self, initialize from constructor parameters if no initially parms
+    #
+    writes(f,"  self := ",nam,"__state(&null,",nam,"__oprec")
+
+    if (("initially" == (m := (methods$foreach()))$name()) &
+       (m.fields ~=== &null)) |
+   (((mn := !(self.imethods)).ident == "initially") &
+    (m := classes.lookup(mn.Class).methods.lookup("initially")) &
+    (m.fields ~=== &null))
+   then {
+       yyprint(")\n  self.__s := self\n")
+       if \ (m.fields.varg) then {
+          m.fields.String()[1:-2] ? {
+             if find(",") then {
+                 writes(f,"  self.__m.initially!([self,")
+                 while writes(f,tab(find(","))) do {
+                    move(1)   # if last was nonfinal write it
+                    if find(",") then writes(f,",")
+                    }
+                 write(f, "]|||", tab(0),") | fail")
+                 }
+             else {
+                write(f,"  self.__m.initially!(push(", tab(0), ",self)) | fail")
+                  }
+             }
+          }
+      else {
+          writes(f,"  self.__m.initially(self,")
+          yyprint(m.fields)
+          yyprint(") | fail\n")
+          }
+       }
+   else {
+      every fld := fields$foreach() do {
+         if type(fld) == "treenode" then writes(f,",",fld.children[1].s)
+         else
+            writes(f,",",fld)
+         }
+      if \self.ifields then
+         every ifi := (!self.ifields).ident do {
+            if type(ifi) == "string" then writes(f,",",ifi)
+            else if type(ifi) == "treenode" & ifi.label == "arg3" then {
+               writes(f, ",", ifi.children[1].s)
+               }
+            else {
+               write(&errout, "unicon: system error inheriting ", type(ifi))
+               }
+            }
+       yyprint(")\n  self.__s := self\n")
+    if ((methods$foreach())$name()| (!self.imethods).ident) == "initially" then
+          yyprint("  self.__m.initially(self) | fail\n")
+       }
+
+    #
+    # call my initially method, if any
+    #
+
+    #
+    # by default, just return the self object we've constructed.
+    #
+    # In strict mode, return the pair that comprises the object:
+    # a pointer to the instance (__mystate), and
+    # a pointer to the class operation record
+    #
+    if \strict then
+       yyprint("  return idol_object(self,"||self.name||"__oprec)\nend\n\n")
+    else yyprint("  return self\nend\n\n")
+
+
+    #
+    # write out class initializer procedure to initialize my operation record
+    #
+    yyprint("procedure "||nam||"initialize()\n")
+    writes(f,"  initial ",nam,"__oprec := ",nam,"__methods")
+    rv := "("
+    every s := (methods$foreach())$name() do {          # explicit methods
+      if *rv>1 then rv ||:= ","
+      rv := rv || nam || "_" || s
+    }
+    every l := !self.imethods do {                      # inherited methods
+      if *rv>1 then rv ||:= ","
+      rv := rv || l.Class || "_" || l.ident
+    }
+    yyprint(rv||")\nend\n")
+  end
+
+  #
+  # resolve -- primary inheritance resolution utility
+  #
+  method resolve()
+    write("Idol class: Class.resolve()")
+    #
+    # these are lists of [class , ident] records
+    #
+    self.imethods := []
+    self.ifields := []
+    ipublics := []
+    addedfields := table()
+    addedmethods := table()
+    every sc := supers$foreach() do {
+        if /(superclass := classes$lookup(sc)) then
+            halt("class/resolve: couldn't find superclass ",sc)
+        every superclassfield := superclass$foreachfield() do {
+            if /self.fields$lookup(superclassfield) &
+               /addedfields[superclassfield] then {
+                addedfields[superclassfield] := superclassfield
+                put ( self.ifields , classident(sc,superclassfield) )
+                if superclass$ispublic(superclassfield) then
+                    put( ipublics, classident(sc,superclassfield) )
+            } else if \strict then {
+                warn("class/resolve: '",sc,"' field '",superclassfield,
+                     "' is redeclared in subclass ",self.name)
+            }
+        }
+        every superclassmethod := (superclass$foreachmethod())$name() do {
+            if /self.methods$lookup(superclassmethod) &
+               /addedmethods[superclassmethod] then {
+                addedmethods[superclassmethod] := superclassmethod
+                put ( self.imethods, classident(sc,superclassmethod) )
+            }
+        }
+        every public := (!ipublics) do {
+            if public.Class == sc then
+                put (self.imethods, classident(sc,public.ident))
+        }
+    }
+  end
+end

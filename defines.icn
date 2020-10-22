@@ -1,0 +1,38 @@
+$define MERRADDRESS "jeffery@cs.uidaho.edu"
+
+$ifdef _MS_WINDOWS_NT
+$define PATHCHAR "\\"
+$else
+$define PATHCHAR "/"
+$endif
+
+#$define debuglex 1
+
+$ifndef NoPatternIntegration
+$define PatternIntegration 1
+$endif
+
+#
+# the tokflags will tell you whether the token can start an expression or
+# end an expression, as well as whether a newline was seen since the last
+# token. The following defines are used by the lexer.
+#
+
+$define Neither 0                       #DF: The token is not indicated to
+                                        #:   start a new expression line
+                                        #:   when it found as the first token
+                                        #:   or end an expressions when it
+                                        #:   is found as the last token
+                                        #:   on a source code line
+$define Beginner 1                      #DF: The token is validly able to
+                                        #:   start a new expression when
+                                        #:   it is found to be the first
+                                        #:   token found on a new line in
+                                        #:   the source
+$define Ender 2                         #DF: The token is validly able to
+                                        #:   end an expression when it is
+                                        #:   found to be the last token on a
+                                        #:   line in the source
+$define Newline 4                       #DF: An actual new line has been
+                                        #:   encountered while processing
+                                        #:   the source file

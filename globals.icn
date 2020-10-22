@@ -1,0 +1,169 @@
+### Global variables
+#
+# FILES  : fin = input (.iol) file, fout = output (.icn) file
+# CSETS  : alpha = identifier characters, nonalpha = everything else
+#          alphadot = identifiers + '.'
+#          white = whitespace, nonwhite = everything else
+# TAQUES : classes in this module
+# FLAGS  : comp if we should try to make an executable from args[1]
+#          strict if we should generate paranoic encapsulation protection
+#          loud if we should generate extra console messages
+#          xec if we should run the result after translation
+# LISTS  : links = names of external icon code to link to
+#          imports = names of external classes to import
+#
+global  parsingErrors,                  #GV: list that will contain ParseError records (if any parse errors are found)
+        returnErrorsFlag,               #GV: if set by the command line, will return the value of parsingErrors
+        fin,                            #GV: does not appear to be used
+        flog,                           #GV: contains the current log file refernce if log files are in use
+        flogname,                       #GV: holds the name of the temporary file that is used asa log file for this run
+        yyfilename,                     #GV: name of the current file being processed (can be source or ucode)
+        fLine,                          #GV: the current line in the current file being processed
+        alpha,                          #GV: cset containing all valid unicon identifier characters,
+                                        #:   it should be noted that this global is used in idol.icn It
+                                        #:   is also defined and initialised in ui.icn
+        alphadot,                       #GV: cset containing all of alpha (above) but '.',
+                                        #:   it should be noted that this global is used in idol.icn. It
+                                        #:   is also defined and initialised in ui.icn
+        white,                          #GV: cset containing space, tab. formfeed and carriage return,
+                                        #:   it should be noted that this global is used in the idol.icn
+                                        #:   and the procedure fethcspec has static versions of this
+                                        #:   variable with different values. It is also defined an
+                                        #:   initialised in the ui.icn file (which also links in this file)
+        nonwhite,                       #GV: cset not containing whitespace (as define in white),
+                                        #:   it should be noted that this global is used in the idol.icn
+                                        #:   and the procedure fethcspec has static versions of this
+                                        #:   variable with different values. It is also defined an
+                                        #:   initialised in the ui.icn file (which also links in this file)
+        nonalpha,                       #GV: #NU# cset containing all characters not in alpha. It
+                                        #:   is also defined and initialised in ui.icn. It is not used
+                                        #:   within the unicon compiler or ui.
+        classes,                        #GV:
+        comp,                           #GV:
+        xec,                            #GV: if set, run the resultant program after translation
+        strict,                         #GV:
+        links,                          #GV:
+        imports,                        #GV:
+        loud,                           #GV: unicon will display various messages as it progresses
+                                        #:   through the compilation process
+        ct,                             #GV:
+        reserved,                       #GV:
+        optimize,                       #GV:
+        icontopt,                       #GV:
+        ilinkopt,                       #GV:
+        tempenv,                        #GV:
+        tmpcount,                       #GV: used as a counter for the cretaion of temporary variables
+                                        #:   during code generation, typically the variable names are
+                                        #:   of the for __nnn where nnn is the value contained in the
+                                        #:   variable tmpcount. This value is reset whenever a procedure,
+                                        #:   class, method, record or package is encountered. It is also
+                                        #:   used for the creation of temporary variables when processing
+                                        #:   the code for the iconc compiler.
+        exename,                        #GV:
+        widollog,                       #GV:
+        tmpname,                        #GV:
+        silent,                         #GV: flag used to indicate that the compiler run in silent mode
+        yydbg,                          #GV:
+        yyout,                          #GV:
+        linkline,                       #GV:
+        translateducode,                #GV:
+        imported,                       #GV:
+        imported_classes,               #GV:
+        warnings,                       #GV
+        EmptyNode,                      #GV: in main repository, this has been removed and all
+                                        #:   references have been changed to &null. was local,
+                                        #:   but should be global, represents an empty node in
+                                        #:   the parse tree
+        env,                            #GV: this variable is set in unix.icn and has the default value of
+                                        #:   "uniclass". If the Environment variable "IDOLENV" is defined then
+                                        #:   use this value instead. Variable is only used in idol.icn
+        outfilename,                    #GV: initialised in this file, used in unigram(.y/.icn) and in tree.icn
+        dbg,                            #GV:
+        fset                            #GV: cset containing the specified options
+                                        #:   found when using -f[adelns]
+#
+# These globals for -C, they are all related to the iconc compiler processing
+#
+global  iconc,                          #GV: set this variable to something other than &null to
+                                        #:   direct all the processing through the iconc compiler
+        iconc_links,                    #GV:
+        iconc_parsed,                   #GV:
+        iconc_imports,                  #GV:
+        iconc_posixloc,                 #GV:
+        iconc_parsed_posix,             #GV:
+        iconc_perifile_idx,             #GV:
+        iconc_fd,                       #GV: if iconc is used, add the -fd option (off by default)
+        no_iconc_fs                     #GV: don't add -fs by default, if iconc is used. This is now changed
+                                        #:   and -fs is on by default, to turn off now use -nofs
+
+
+$define MERRADDRESS "jeffery@cs.uidaho.edu"
+
+global  merrflag,                       #GV:
+        merraddress,                    #GV:
+        uni_predefs                     #GV:
+
+#
+# These are the globals that are specific to the iconc related code.
+#
+global  uftbl,                          #GV: contains a table of all unicon
+                                        #:   source file to output icon file
+                                        #:   associations with the iconc
+                                        #:   required information
+        ubndls,                         #GV: list of all ubundles
+        ufmain                          #GV: name of the unicon source file
+                                        #:   containing the main() procedure
+
+#
+# The following globals are used within the lexer code
+#
+global  yytext,                         #GV: the current token text being
+                                        #:   constructed by the lexer
+        yyin,                           #GV: the current input source for
+                                        #:   the lexer and parser
+        yytoken,                        #GV: the current token type
+        yylineno,                       #GV: the current line number in
+                                        #:   the current input source
+        yycolno,                        #GV: the current column in the
+                                        #:   the current line of the
+                                        #:   current input source
+        yyfilename                      #GV: the name of the current input
+                                        #:   source file.
+
+#global  debuglex                       #GV:
+
+#
+# The following global variables are used to hold specific csets for use
+# in the lexer. The csets are the valid characters that are applicable for
+# the associated tokens.
+#
+global  OctalCharacters,                #GV: octal digits 0 to 7
+        DecimalCharacters,              #GV: decimal digits 0 to 9
+        LetterCharacters,               #GV: cset of letters, includes "_",
+                                        #:   valid first character of identifiers
+        HexadecimalCharacters,          #GV: cset of hexadecimal digits
+        RadixNumberCharacters,          #GV: cset of digits and letters, used
+                                        #:   for radix defined numbers
+        FS,                             #GV: Not used
+        IS,                             #GV: Not used
+        WhitespaceCharacters,           #GV: cset of whitespace characters
+        idchars                         #GV: cset of valid characters used in
+                                        #:   identifiers from 2nd character on
+
+global  tokflags,                       #GV:
+        lastid,                         #GV:
+        buffer,                         #GV:
+        lastchar                        #GV:
+
+
+#
+# Global variable to allow context-sensitive lexer switching.
+# This is preparation to improve regular expression lexical rules.
+#
+global  yylex2                          #GV: this holds the current lexer
+                                        #:   procedure being used. by changing
+                                        #:   the value held in this variable,
+                                        #:   we are able to change how the
+                                        #:   source is processed into tokens.
+                                        #:   In the current case allows for a
+                                        #:   specialised lexer to be used for regex.

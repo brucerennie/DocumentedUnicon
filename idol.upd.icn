@@ -55,6 +55,11 @@ procedure fetchspec(name)
         #
         nonwhite := &cset -- white
     }
+    #
+    # since we have set the basedir to default to ".", we will only update this
+    # we actually find that the specified name contains a different directory
+    # location
+    #
     basedir := ("" ~== tmplst[1])
     name := tmplst[2]
     if f := open(basedir || "/" || env, "dr") then {

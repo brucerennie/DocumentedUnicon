@@ -61,4 +61,18 @@ record token(
                                         #:   token has occurred
 )
 
+#RD:
+#: A record type for recording errors for later reporting e.g. within an IDE,
+#: or to stderr.
+#:
+record ParseError(
+    lineNumber,                         #RF:
+    errorMessage                        #RF:
+)
+
+#RD:
+#: A record type used withing cfy.icn
+#:
+record recdecl(name, flds, xform)
+
 

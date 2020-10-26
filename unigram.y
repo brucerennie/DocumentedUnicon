@@ -256,9 +256,6 @@ procedure Keyword(x1, x2)
     return node("keyword", x1, x2)
 end
 
-global  set_of_all_fields,              #GD: used for iconc processing
-        dummyrecno                      #GD:
-
 #PD:
 #: This procedure adds any field names from classes to the set used by the iconc
 #: compiler. Nothing is required for the interpreter. The relevant field being
@@ -271,7 +268,7 @@ procedure Field(x1, x2, x3)
     }
     #
     # if the source will be processed by iconc, we need to add any identifier
-    # that is refernceing a field in a record to the set.
+    # that is referencing a field in a record to the set.
     #
     if \iconc then {
         if type(x3) == "token" then {
@@ -311,14 +308,6 @@ procedure Clone1stToken(n)
         }
     }
 end
-
-global  outline,                        #GD:
-        outcol,                         #GD:
-        outfilename,                    #GD:
-        package_level_syms,             #GD: a set containing the package-level symbols that
-                                        #:   have been defined within the current file being processed
-        package_level_class_syms        #GD: a set containing the package-level class symbols that
-                                        #:   have been defined within the current file being processed
 
 #PD:
 #: This procedure is called at the completion of the syntax parsing process.
@@ -1517,11 +1506,3 @@ procedure tablelit(lb, cl, rb)
     return node("invoke", tabid, lp, args, rp)
 end
 
-#RD:
-#: A record type for recording errors for later reporting e.g. within an IDE,
-#: or to stderr.
-#:
-record ParseError(
-    lineNumber,                         #RF:
-    errorMessage                        #RF:
-)
